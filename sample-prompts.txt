@@ -1,0 +1,5 @@
+# One prompt per line. Lines starting with # are ignored.
+Close-up product photo of folded indigo denim fabric on a wooden table, soft daylight, shallow depth of field
+Flat lay of five denim swatches in different washes, light to dark, top-down view, white background
+Model wearing a dark rinse denim jacket walking on a city street at golden hour, 35mm photo
+Macro shot of selvedge denim edge with red line, sharp detail, studio lighting
