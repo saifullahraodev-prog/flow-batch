@@ -57,6 +57,12 @@ or outlines the wrong thing:
 
 ## Notes
 
+- Flow ignores clicks made by page scripts, so the extension sends real
+  clicks/key presses through Chrome's debugger interface. While a batch runs,
+  Chrome shows a bar saying **"Flow Batch started debugging this browser"** –
+  leave it (pressing Cancel stops the clicks). It disappears when the run ends.
+  Don't open DevTools on the Flow tab during a run.
+
 - Each generation uses your Flow credits/quota, same as clicking by hand.
 - Keep the Flow tab open (it can be in the background, but don't close it).
 - Pause holds the run after the current prompt finishes; Stop ends it.

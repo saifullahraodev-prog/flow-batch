@@ -3,7 +3,7 @@
   "name": "Flow Batch",
   "version": "1.0.0",
   "description": "Upload a .txt file of prompts and run them through Google Flow one by one, optionally downloading every generated image.",
-  "permissions": ["storage", "downloads"],
+  "permissions": ["storage", "downloads", "debugger"],
   "host_permissions": [
     "https://flow.google.com/*",
     "https://labs.google/*",

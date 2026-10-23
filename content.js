@@ -114,8 +114,9 @@
     }
   }
 
-  // Labels / icon names the submit button might carry.
-  const BUTTON_RE = /\b(create|generate|send|submit|run)\b|arrow_forward|arrow_upward|north|send/i;
+  // Labels / icon names the submit button might carry, and ones it never does.
+  const BUTTON_RE = /\b(generate|send|submit)\b|arrow_forward|arrow_upward/i;
+  const NOT_SUBMIT_RE = /\b(close|clear|cancel|remove|delete|add|agent)\b/i;
 
   function buttonLabel(b) {
     return [
@@ -148,7 +149,8 @@
     if (buttonSelector) return document.querySelector(buttonSelector);
     const composer = findComposer(box);
     if (!composer) return null;
-    const { btns } = composer;
+    const btns = composer.btns.filter((b) => !NOT_SUBMIT_RE.test(buttonLabel(b)));
+    if (!btns.length) return null;
     const labelled = btns.find((b) => BUTTON_RE.test(buttonLabel(b)));
     if (labelled) return labelled;
     // No telling label: the submit arrow is the right-most, lowest button in the bar.
@@ -182,38 +184,73 @@
     el.dispatchEvent(new KeyboardEvent('keyup', opts));
   }
 
-  // Signals that Flow accepted the prompt: box cleared, or new tiles/progress appeared.
-  function pageSignature() {
-    return document.querySelectorAll('img, video, [role="progressbar"], [aria-busy="true"]').length;
+  // Real (trusted) click / Enter, sent by the background script via chrome.debugger.
+  async function trusted(type, extra = {}) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type, ...extra });
+      if (res && !res.ok) log(`Real ${type === 'trustedClick' ? 'click' : 'Enter'} failed: ${res.error}`);
+      return !!(res && res.ok);
+    } catch (e) {
+      log(`Real input failed: ${e.message}`);
+      return false;
+    }
   }
 
-  async function waitSubmitted(box, text, sigBefore, ms) {
+  async function trustedClickOn(el) {
+    const r = el.getBoundingClientRect();
+    return trusted('trustedClick', { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+  }
+
+  // Watch for anything Flow adds to the page outside the prompt bar and our panel
+  // (a new generating tile, the empty-state disappearing, a progress spinner…).
+  function watchPage(composerNode) {
+    let changes = 0;
+    const obs = new MutationObserver((muts) => {
+      for (const m of muts) {
+        const nodes = [...m.addedNodes, ...m.removedNodes];
+        for (const n of nodes) {
+          if (n.nodeType !== 1 || n === host || host.contains(n)) continue;
+          if (composerNode && (composerNode.contains(n) || composerNode.contains(m.target))) continue;
+          if (/^(STYLE|SCRIPT|LINK|META)$/.test(n.nodeName)) continue;
+          // Hover tooltips on the button are not a sign that generation started.
+          if (n.getAttribute('role') === 'tooltip' || (n.isConnected && n.closest('[role="tooltip"]'))) continue;
+          changes++;
+        }
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+    return { changes: () => changes, stop: () => obs.disconnect() };
+  }
+
+  async function waitSubmitted(box, text, watcher, ms) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
       await sleep(250);
       const live = findPromptBox() || box;
-      if (norm(readText(live)) !== norm(text)) return true;
-      if (pageSignature() !== sigBefore) return true;
+      if (norm(readText(live)) !== norm(text)) return true; // prompt box was cleared
+      if (watcher.changes() >= 2) return true;               // new content appeared
     }
     return false;
   }
 
   async function submitPrompt(box, text, index) {
+    const composer = findComposer(box);
     const attempts = [
-      ['clicked the generate button', () => {
+      ['real click on the generate button', async () => {
+        const btn = findGenerateButton(box);
+        return btn ? trustedClickOn(btn) : false;
+      }],
+      ['real Enter key', async () => {
+        box.focus();
+        return trusted('trustedEnter');
+      }],
+      ['scripted click', async () => {
         const btn = findGenerateButton(box);
         if (!btn) return false;
         humanClick(btn);
         return true;
       }],
-      ['pressed Enter', () => (pressEnter(box), true)],
-      ['pressed Ctrl+Enter', () => (pressEnter(box, { ctrlKey: true }), true)],
-      ['clicked the generate button (plain click)', () => {
-        const btn = findGenerateButton(box);
-        if (!btn) return false;
-        btn.click();
-        return true;
-      }]
+      ['scripted Enter', async () => (pressEnter(box), true)]
     ];
 
     // Give Flow a moment to enable the button after the text arrives.
@@ -224,11 +261,19 @@
     }
 
     for (const [how, act] of attempts) {
-      const sig = pageSignature();
-      if (!act()) continue;
-      if (await waitSubmitted(box, text, sig, 4000)) {
-        log(`#${index + 1} submitted (${how})`);
-        return true;
+      if (state.stopRequested) return false;
+      const watcher = watchPage(composer && composer.node);
+      try {
+        if (!(await act())) continue;
+        // Wait a bit longer than Flow needs, so a slow start isn't mistaken for
+        // a failure (which would submit the same prompt twice).
+        if (await waitSubmitted(box, text, watcher, 6000)) {
+          log(`#${index + 1} submitted (${how})`);
+          return true;
+        }
+        log(`#${index + 1}: no response to ${how}, trying next method`);
+      } finally {
+        watcher.stop();
       }
     }
     return false;
@@ -372,6 +417,7 @@
 
     state.running = false;
     state.paused = false;
+    chrome.runtime.sendMessage({ type: 'detach' }).catch(() => {}); // removes the "debugging" bar
     log(state.stopRequested ? 'Stopped' : 'Finished all prompts');
     state.stopRequested = false;
     render();
@@ -585,6 +631,7 @@
     const btn = box && findGenerateButton(box);
     log(`Prompt box: ${box ? box.tagName.toLowerCase() + ' ✓' : 'NOT FOUND'}`);
     log(`Generate button: ${btn ? `"${buttonLabel(btn) || btn.tagName}" ✓` : 'NOT FOUND (will press Enter)'}`);
+    if (btn) log(`Button HTML: ${btn.outerHTML.replace(/\s+/g, ' ').slice(0, 200)}`);
     for (const el of [box, btn]) {
       if (!el) continue;
       const old = el.style.outline;
