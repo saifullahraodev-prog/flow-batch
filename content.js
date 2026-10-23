@@ -90,46 +90,148 @@
     return hinted || candidates[0] || null;
   }
 
+  function readText(el) {
+    return el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement ? el.value : el.innerText || '';
+  }
+
+  const norm = (s) => s.replace(/\s+/g, ' ').trim();
+
   function setText(el, text) {
     el.focus();
+    // 1st choice: real "typing" via insertText – fires the beforeinput/input events
+    // that React and rich-text editors (Slate/Lexical) actually listen to.
+    if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) el.select();
+    else document.execCommand('selectAll', false, null);
+    document.execCommand('insertText', false, text);
+    if (norm(readText(el)) === norm(text)) return;
+
+    // Fallback for plain React textareas: native value setter + input event.
     if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
-      // React tracks the value itself, so go through the native setter.
       const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-    } else {
-      // contenteditable / rich editors listen for real input events.
-      document.execCommand('selectAll', false, null);
-      document.execCommand('insertText', false, text);
     }
   }
 
-  // Flow's submit button is usually an arrow icon (Material icon text) or labelled Create/Generate.
-  const BUTTON_RE = /\b(create|generate|send|submit)\b|arrow_forward|arrow_upward/i;
+  // Labels / icon names the submit button might carry.
+  const BUTTON_RE = /\b(create|generate|send|submit|run)\b|arrow_forward|arrow_upward|north|send/i;
 
   function buttonLabel(b) {
-    return ((b.getAttribute('aria-label') || '') + ' ' + (b.innerText || '')).trim();
+    return [
+      b.getAttribute('aria-label'),
+      b.getAttribute('title'),
+      b.getAttribute('data-tooltip'),
+      b.getAttribute('data-testid'),
+      b.innerText
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  const isDisabled = (b) => b.disabled || b.getAttribute('aria-disabled') === 'true';
+
+  // The prompt bar = the closest ancestor of the box that also holds several buttons
+  // (in Flow: "+", "Agent", the model chip, and the → submit arrow).
+  function findComposer(box) {
+    let node = box.parentElement;
+    for (let depth = 0; node && depth < 10; depth++, node = node.parentElement) {
+      const btns = [...node.querySelectorAll('button, [role="button"]')].filter(isVisible);
+      if (btns.length >= 2) return { node, btns };
+    }
+    return null;
   }
 
   function findGenerateButton(box) {
     const { buttonSelector } = state.settings;
     if (buttonSelector) return document.querySelector(buttonSelector);
-    // Search outward from the prompt box so we pick the button next to it.
-    let node = box;
-    for (let depth = 0; node && depth < 8; depth++, node = node.parentElement) {
-      const match = [...node.querySelectorAll('button, [role="button"]')]
-        .filter(isVisible)
-        .find((b) => BUTTON_RE.test(buttonLabel(b)));
-      if (match) return match;
-    }
-    return null;
+    const composer = findComposer(box);
+    if (!composer) return null;
+    const { btns } = composer;
+    const labelled = btns.find((b) => BUTTON_RE.test(buttonLabel(b)));
+    if (labelled) return labelled;
+    // No telling label: the submit arrow is the right-most, lowest button in the bar.
+    return btns.reduce((best, b) => {
+      const r = b.getBoundingClientRect();
+      const br = best.getBoundingClientRect();
+      return r.right > br.right + 2 || (Math.abs(r.right - br.right) <= 2 && r.bottom > br.bottom) ? b : best;
+    });
   }
 
-  function pressEnter(el) {
-    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+  // Full pointer/mouse sequence – some UIs ignore a bare element.click().
+  function humanClick(el) {
+    const r = el.getBoundingClientRect();
+    const base = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+    el.dispatchEvent(new PointerEvent('pointerover', base));
+    el.dispatchEvent(new PointerEvent('pointerenter', base));
+    el.dispatchEvent(new MouseEvent('mouseover', base));
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...base, buttons: 1, pointerType: 'mouse', isPrimary: true }));
+    el.dispatchEvent(new MouseEvent('mousedown', { ...base, buttons: 1 }));
+    el.focus && el.focus();
+    el.dispatchEvent(new PointerEvent('pointerup', { ...base, pointerType: 'mouse', isPrimary: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', base));
+    el.dispatchEvent(new MouseEvent('click', base));
+  }
+
+  function pressEnter(el, extra = {}) {
+    el.focus();
+    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true, ...extra };
     el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
     el.dispatchEvent(new KeyboardEvent('keyup', opts));
+  }
+
+  // Signals that Flow accepted the prompt: box cleared, or new tiles/progress appeared.
+  function pageSignature() {
+    return document.querySelectorAll('img, video, [role="progressbar"], [aria-busy="true"]').length;
+  }
+
+  async function waitSubmitted(box, text, sigBefore, ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      await sleep(250);
+      const live = findPromptBox() || box;
+      if (norm(readText(live)) !== norm(text)) return true;
+      if (pageSignature() !== sigBefore) return true;
+    }
+    return false;
+  }
+
+  async function submitPrompt(box, text, index) {
+    const attempts = [
+      ['clicked the generate button', () => {
+        const btn = findGenerateButton(box);
+        if (!btn) return false;
+        humanClick(btn);
+        return true;
+      }],
+      ['pressed Enter', () => (pressEnter(box), true)],
+      ['pressed Ctrl+Enter', () => (pressEnter(box, { ctrlKey: true }), true)],
+      ['clicked the generate button (plain click)', () => {
+        const btn = findGenerateButton(box);
+        if (!btn) return false;
+        btn.click();
+        return true;
+      }]
+    ];
+
+    // Give Flow a moment to enable the button after the text arrives.
+    for (let i = 0; i < 20; i++) {
+      const btn = findGenerateButton(box);
+      if (!btn || !isDisabled(btn)) break;
+      await sleep(250);
+    }
+
+    for (const [how, act] of attempts) {
+      const sig = pageSignature();
+      if (!act()) continue;
+      if (await waitSubmitted(box, text, sig, 4000)) {
+        log(`#${index + 1} submitted (${how})`);
+        return true;
+      }
+    }
+    return false;
   }
 
   function collectImages() {
@@ -150,16 +252,10 @@
 
     const before = new Set(collectImages());
     setText(box, p.text);
-    await sleep(700);
+    await sleep(800);
 
-    let btn = findGenerateButton(box);
-    for (let i = 0; btn && btn.disabled && i < 10; i++) await sleep(500);
-    if (btn && !btn.disabled) {
-      btn.click();
-      log(`#${index + 1} submitted`);
-    } else {
-      pressEnter(box);
-      log(`#${index + 1} submitted with Enter (no generate button found)`);
+    if (!(await submitPrompt(box, p.text, index))) {
+      throw new Error('Flow did not accept the prompt – use Advanced → Test detection, or set the button selector.');
     }
 
     const { perPrompt, stableSec, timeoutSec } = state.settings;
