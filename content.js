@@ -547,13 +547,15 @@
   }
 
   $('pick').onclick = () => $('file').click();
-  $('file').onchange = async (e) => {
-    const f = e.target.files[0];
+  $('file').onchange = async () => {
+    // Keep a direct reference: inside shadow DOM, e.target is null after an await.
+    const input = $('file');
+    const f = input.files[0];
     if (!f) return;
     rawFileText = await f.text();
     state.fileName = f.name;
     loadPrompts();
-    e.target.value = '';
+    input.value = ''; // so picking the same file again still triggers a reload
   };
   $('splitMode').onchange = (e) => {
     state.settings.splitMode = e.target.value;
