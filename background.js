@@ -2,7 +2,9 @@ const FLOW_URL = 'https://flow.google.com/';
 const FLOW_PREFIXES = ['https://flow.google.com/', 'https://labs.google/fx/'];
 
 // Toolbar icon: toggle the panel on a Flow tab, otherwise open Flow.
-chrome.action.onClicked.addListener((tab) => {
+// (Guarded so the rest of the background script still runs if the toolbar
+// API is unavailable – the panel itself is added by the content script.)
+chrome.action?.onClicked.addListener((tab) => {
   if (tab.id && tab.url && FLOW_PREFIXES.some((p) => tab.url.startsWith(p))) {
     chrome.tabs.sendMessage(tab.id, { type: 'toggle' }).catch(() => {});
   } else {
