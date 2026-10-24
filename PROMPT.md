@@ -102,7 +102,13 @@ the open Flow project, with no human interaction after pressing Start:
    "Uploading" while busy) – it is NOT attached until that option is clicked,
    which closes the dialog and shows a 50×50 `<img>` in
    `flow-prompt-box-instruction-card-wrapper`. Already-uploaded assets are
-   re-used by name. Submit button: `aria-label="Start generation"`; prompt box
+   re-used by name. **Desktop-width layout differs**: "+" opens a popover
+   (`flow-add-menu-popover-content` / `.add-menu-popover-container`, NOT
+   role=dialog) with the list, a preview pane and an "Add to prompt" button –
+   clicking an asset only previews it; "Add to prompt" attaches it. The
+   attached chip is `button[aria-label="Ingredient"]` inside
+   `flow-ingredient-bar` (within `flow-base-prompt-box`). Escape closes the
+   popover. Always test both phone and desktop widths. Submit button: `aria-label="Start generation"`; prompt box
    is a ProseMirror `[role=textbox]`; the "Settings trigger" chip text ends in
    `x<N>` = images per prompt. Media URLs are on `flow-content.google` (CORS:
    fetch them from the background script).

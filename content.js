@@ -315,10 +315,13 @@
 
   // Attached reference thumbnails (ignores tiny icons such as the model logo).
   function refThumbs(card) {
-    return [...card.querySelectorAll('img')].filter((img) => {
+    // Flow labels each attached reference as an "Ingredient".
+    const ingredients = [...card.querySelectorAll('[aria-label="Ingredient"]')].filter(isVisible);
+    const imgs = [...card.querySelectorAll('img')].filter((img) => {
       const r = img.getBoundingClientRect();
       return r.width >= 28 && r.height >= 28 && isVisible(img);
     });
+    return ingredients.length >= imgs.length ? ingredients : imgs;
   }
 
   const liveCard = (box) => findComposerCard(findPromptBox() || box);
@@ -388,13 +391,22 @@
     );
   }
 
+  // Phone-size layout: a full-screen role=dialog "Add assets to the project".
+  // Desktop layout: a popover (flow-add-menu-popover-content) with a list, a
+  // preview pane and an "Add to prompt" button.
   function findAssetDialog() {
-    return (
-      [...document.querySelectorAll('[role="dialog"]')].find(
-        (d) => isVisible(d) && !host.contains(d) && (/asset/i.test(d.getAttribute('aria-label') || '') || d.querySelector('[aria-label="Asset list"], .asset-item'))
-      ) || null
+    const cands = document.querySelectorAll(
+      'flow-add-menu-popover-content, .add-menu-popover-container, [role="dialog"], .cdk-overlay-pane'
     );
+    for (const d of cands) {
+      if (!isVisible(d) || host.contains(d)) continue;
+      if (/asset/i.test(d.getAttribute('aria-label') || '') || d.querySelector('.asset-item, [aria-label="Asset list"]')) return d;
+    }
+    return null;
   }
+
+  const findAddToPrompt = (dlg) =>
+    [...dlg.querySelectorAll('button')].filter(isVisible).find((b) => /^add to prompt$/i.test(norm(b.innerText || b.getAttribute('aria-label') || ''))) || null;
 
   function findAssetOption(dlg, name) {
     return [...dlg.querySelectorAll('[role="option"], .asset-item')].filter(isVisible).find((o) => norm(o.innerText || '').includes(name)) || null;
@@ -415,23 +427,41 @@
   const ATTACH = {
     // 1. Flow's asset picker – re-uses the asset if it was uploaded before.
     async picker(box, ref) {
+      const step = (msg) => log(`  · ${msg}`);
       const plus = findPlusButton(liveCard(box));
-      if (!plus) return false;
-      if (!findAssetDialog()) await trustedClickOn(plus);
-      let dlg = await waitFor(findAssetDialog, 5000);
-      if (!dlg) return false;
+      if (!plus) {
+        step('"+" (Add ingredients) button not found');
+        return false;
+      }
+      if (!findAssetDialog()) {
+        const clicked = await trustedClickOn(plus);
+        step(`clicked "+" ${clicked ? '' : '(click FAILED)'}`);
+      }
+      const dlg = await waitFor(findAssetDialog, 5000);
+      if (!dlg) {
+        step('asset dialog did not open');
+        return false;
+      }
+      const options = () => {
+        const d = findAssetDialog();
+        return d ? [...d.querySelectorAll('[role="option"], .asset-item')].filter(isVisible) : [];
+      };
+      step(`asset dialog open – ${options().length} asset(s) listed`);
 
       let opt = findAssetOption(dlg, ref.name);
-      if (!opt) {
-        const up = [...dlg.querySelectorAll('button, [role="button"]')]
-          .filter(isVisible)
-          .find((b) => /upload/i.test(buttonLabel(b)));
+      if (opt) {
+        step(`"${ref.name}" already in the project – re-using it`);
+      } else {
+        const before = new Set(options());
+        const up = [...dlg.querySelectorAll('button, [role="button"]')].filter(isVisible).find((b) => /upload/i.test(buttonLabel(b)));
         if (!up) {
+          step('"Upload media" button not found');
           await closeAssetDialog();
           return false;
         }
         const armed = await chrome.runtime.sendMessage({ type: 'armFileChooser', refs: [ref] });
         if (!armed || !armed.ok) {
+          step(`could not prepare the upload: ${armed && armed.error}`);
           await closeAssetDialog();
           return false;
         }
@@ -439,30 +469,47 @@
           await trustedClickOn(up);
           const res = await chrome.runtime.sendMessage({ type: 'awaitFileChooser', ms: 6000 });
           if (!res.ok) {
-            log(`Upload: ${res.error}`);
+            step(`upload dialog: ${res.error}`);
             await closeAssetDialog();
             return false;
           }
         } finally {
           await chrome.runtime.sendMessage({ type: 'disarmFileChooser' });
         }
-        log(`Uploading "${ref.name}" to the project…`);
+        step(`uploading "${ref.name}"…`);
+        // The new asset = by name, or else the entry that wasn't there before the upload.
+        opt = await waitFor(() => {
+          const o = findAssetOption(findAssetDialog() || dlg, ref.name) || options().find((x) => !before.has(x));
+          return o && !isUploading(o) ? o : null;
+        }, 120000, 500);
+        if (!opt) {
+          step('upload did not finish within 2 minutes');
+          await closeAssetDialog();
+          return false;
+        }
+        step('upload finished');
       }
 
-      // Wait until the asset is listed and finished uploading, then pick it.
-      opt = await waitFor(() => {
-        const d = findAssetDialog();
-        const o = d && findAssetOption(d, ref.name);
-        return o && !isUploading(o) ? o : null;
-      }, 120000, 500);
-      if (!opt) {
-        await closeAssetDialog();
-        return false;
-      }
+      // Wait if it is still uploading, then pick it.
+      if (isUploading(opt)) opt = (await waitFor(() => (!isUploading(opt) ? opt : null), 120000, 500)) || opt;
       await sleep(600);
-      await trustedClickOn(opt);
+      const picked = await trustedClickOn(opt);
+      step(`clicked the asset ${picked ? '' : '(click FAILED)'}`);
+      // Desktop layout: the click only previews it – confirm with "Add to prompt".
+      const addBtn = await waitFor(() => {
+        const d = findAssetDialog();
+        return d ? findAddToPrompt(d) : 'closed';
+      }, 2500);
+      if (addBtn && addBtn !== 'closed') {
+        await sleep(300);
+        await trustedClickOn(addBtn);
+        step('clicked "Add to prompt"');
+      }
       await waitFor(() => !findAssetDialog(), 3000);
-      if (findAssetDialog()) await closeAssetDialog();
+      if (findAssetDialog()) {
+        step('dialog still open – closing it');
+        await closeAssetDialog();
+      }
       return true;
     },
     // 1. An upload <input type=file> that belongs to the prompt bar.
@@ -519,8 +566,12 @@
     if (have >= state.refs.length) return; // still attached from the previous prompt
 
     for (const ref of state.refs.slice(have)) {
-      const order = ['picker', 'input', 'menu', 'drop'];
-      if (state.refMethod) order.sort((a, b) => (a === state.refMethod ? -1 : b === state.refMethod ? 1 : 0));
+      // On Flow use only its own asset dialog; the generic fallbacks would just
+      // upload duplicates there. Other UIs: try the generic methods.
+      const flowUI = !!liveCard(box).querySelector('button[aria-label="Add ingredients to the prompt box"]');
+      const order = flowUI ? ['picker'] : ['input', 'menu', 'drop'];
+      if (!flowUI && state.refMethod) order.sort((a, b) => (a === state.refMethod ? -1 : b === state.refMethod ? 1 : 0));
+      log(`#${index + 1} attaching reference "${ref.name}"…`);
       let ok = false;
       for (const how of order) {
         if (state.stopRequested) return;
@@ -536,6 +587,14 @@
           have++;
           log(`#${index + 1} reference "${ref.name}" attached`);
           break;
+        }
+        if (tried) {
+          const card = liveCard(box);
+          const imgs = [...card.querySelectorAll('img')].map((i) => {
+            const r = i.getBoundingClientRect();
+            return `${Math.round(r.width)}x${Math.round(r.height)}`;
+          });
+          log(`  · no thumbnail seen in the prompt bar (<${card.tagName.toLowerCase()}>, images: ${imgs.join(', ') || 'none'}, ingredients: ${card.querySelectorAll('[aria-label="Ingredient"]').length})`);
         }
       }
       if (!ok) throw new Error(`Could not attach reference image "${ref.name}" to Flow.`);
@@ -571,7 +630,7 @@
     box = findPromptBox() || box;
 
     // Snapshot existing images (incl. the references) so only new results count.
-    const refSrcs = refThumbs(liveCard(box)).map((i) => i.currentSrc || i.src);
+    const refSrcs = [...liveCard(box).querySelectorAll('img')].map((i) => i.currentSrc || i.src).filter(Boolean);
     const before = new Set([...collectImages(), ...refSrcs]);
     setText(box, p.text);
     await sleep(800);
@@ -1109,6 +1168,9 @@
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === 'toggle') host.style.display = host.style.display === 'none' ? '' : 'none';
   });
+
+  // Test hook (only when a test harness sets window.__flowBatchTest before loading).
+  if (window.__flowBatchTest) Object.assign(window.__flowBatchTest, { state, ensureReferences, findPromptBox, findGenerateButton, refThumbs, liveCard, flowImageCount });
 
   document.documentElement.appendChild(host);
   load().then(() => {
