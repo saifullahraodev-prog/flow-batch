@@ -1,8 +1,9 @@
 # Flow Batch
 
 Chrome extension that runs a `.txt` list of prompts through Google Flow
-(https://flow.google.com) one after another and can save every
-generated image to your Downloads folder.
+(https://flow.google.com) one after another – optionally with 1–2 reference
+images attached to every prompt – and saves every generated image into a
+folder you choose. After you press Start, nothing needs you until it's done.
 
 ## Install
 
@@ -22,15 +23,25 @@ generated image to your Downloads folder.
 3. Click **Load .txt file…** and choose your prompt file:
    - *One prompt per line* (default) – lines starting with `#` are skipped.
    - *Separated by blank line* – for long, multi-line prompts.
-4. Optional: open **Advanced → Test detection**. The prompt box and generate
+4. Optional: **Reference images…** – pick 1 or 2 images. They're attached to
+   Flow's prompt bar for every prompt (re-attached automatically if Flow
+   clears them after a generation). Remove one with its ×.
+5. **Save folder…** – pick (or create) the folder for the results. Chrome asks
+   once to allow saving there; after that every image is written silently,
+   with no "Save as" boxes. If you skip this, Start asks for it.
+6. Optional: open **Advanced → Test detection**. The prompt box and generate
    button get a red outline for a few seconds so you can check they're right.
-5. Click **Start**. For each prompt it types the text, presses generate, waits
-   for the new images, downloads them, waits a few seconds, then moves on.
+7. Click **Start**. For each prompt it attaches the references, types the
+   text, clicks generate, waits for the new images, saves them, waits a few
+   seconds, then moves on – until the whole list is done.
 
-Images are saved as
-`Downloads/FlowBatch/001_<prompt-words>_1.png`, `001_..._2.png`, `002_...` etc.
-Turn off Chrome's "Ask where to save each file" setting, or you'll get a save
-dialog for every image.
+Each run gets its own sub-folder inside your save folder, named after the
+prompt file and the start time, e.g.
+`<save folder>/prompts_2026-10-24_1530/001_<prompt-words>_1.png`, `002_...`.
+(Resume keeps writing into the same sub-folder.)
+
+If a reference image can't be attached, the run stops instead of generating
+images without it, so no credits are wasted.
 
 Progress is remembered: if the page reloads, the list comes back and **Resume**
 continues from the first prompt not yet done. **Reset** marks everything as
@@ -62,6 +73,10 @@ or outlines the wrong thing:
   Chrome shows a bar saying **"Flow Batch started debugging this browser"** –
   leave it (pressing Cancel stops the clicks). It disappears when the run ends.
   Don't open DevTools on the Flow tab during a run.
+- References are uploaded the way a person would (+ → Upload); the extension
+  answers Flow's file dialog itself, so no Windows file picker appears.
+- After a browser restart Chrome may ask once (on Start) to allow saving to
+  the folder again – choose "Allow on every visit" so it stops asking.
 
 - Each generation uses your Flow credits/quota, same as clicking by hand.
 - Keep the Flow tab open (it can be in the background, but don't close it).

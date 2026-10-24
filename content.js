@@ -10,7 +10,7 @@
     stableSec: 10,         // or finish once new images stop appearing for this long
     delaySec: 5,           // pause between prompts
     autoDownload: true,
-    folder: 'FlowBatch',   // sub-folder inside Chrome's Downloads folder
+    folder: 'FlowBatch',   // only used if no save folder was chosen (Chrome Downloads fallback)
     promptSelector: '',    // optional CSS overrides if auto-detection fails
     buttonSelector: ''
   };
@@ -18,6 +18,9 @@
   const state = {
     prompts: [],           // { text, status, images }
     fileName: '',
+    refs: [],              // reference images { name, dataUrl } – max 2, attached for every prompt
+    runFolder: '',         // sub-folder for this run inside the chosen save folder
+    refMethod: null,       // attach method that worked last time (tried first next time)
     settings: { ...DEFAULTS },
     running: false,
     paused: false,
@@ -37,7 +40,13 @@
 
   function save() {
     chrome.storage.local.set({
-      [STORE_KEY]: { prompts: state.prompts, fileName: state.fileName, settings: state.settings }
+      [STORE_KEY]: {
+        prompts: state.prompts,
+        fileName: state.fileName,
+        settings: state.settings,
+        refs: state.refs,
+        runFolder: state.runFolder
+      }
     });
   }
 
@@ -46,6 +55,8 @@
     if (!data) return;
     state.settings = { ...DEFAULTS, ...(data.settings || {}) };
     state.fileName = data.fileName || '';
+    state.refs = data.refs || [];
+    state.runFolder = data.runFolder || '';
     state.prompts = (data.prompts || []).map((p) => ({
       ...p,
       status: p.status === 'running' ? 'pending' : p.status
@@ -197,8 +208,15 @@
   }
 
   async function trustedClickOn(el) {
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     const r = el.getBoundingClientRect();
-    return trusted('trustedClick', { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+    // A real click lands on whatever is on top – let it pass through our panel.
+    host.style.pointerEvents = 'none';
+    try {
+      return await trusted('trustedClick', { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+    } finally {
+      host.style.pointerEvents = '';
+    }
   }
 
   // Watch for anything Flow adds to the page outside the prompt bar and our panel
@@ -279,9 +297,161 @@
     return false;
   }
 
-  function collectImages() {
+  // ---------- reference images ----------
+
+  // The rounded prompt "card" around the box – where attached references show up.
+  function findComposerCard(box) {
+    let best = box;
+    let node = box.parentElement;
+    for (let d = 0; node && d < 8; d++, node = node.parentElement) {
+      const r = node.getBoundingClientRect();
+      if (r.height > window.innerHeight * 0.6) break;
+      best = node;
+    }
+    return best;
+  }
+
+  // Attached reference thumbnails (ignores tiny icons such as the model logo).
+  function refThumbs(card) {
+    return [...card.querySelectorAll('img')].filter((img) => {
+      const r = img.getBoundingClientRect();
+      return r.width >= 28 && r.height >= 28 && isVisible(img);
+    });
+  }
+
+  const liveCard = (box) => findComposerCard(findPromptBox() || box);
+
+  function dataUrlToFile(ref) {
+    const comma = ref.dataUrl.indexOf(',');
+    const mime = ref.dataUrl.slice(5, ref.dataUrl.indexOf(';'));
+    const bin = atob(ref.dataUrl.slice(comma + 1));
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new File([bytes], ref.name, { type: mime });
+  }
+
+  function findMenuItem(re) {
+    const els = [...document.querySelectorAll('[role="menuitem"], [role="option"], [role="button"], button, li, a, label')]
+      .filter((el) => isVisible(el) && !host.contains(el))
+      .filter((el) => {
+        const t = norm(el.innerText || el.getAttribute('aria-label') || '');
+        return t.length > 0 && t.length < 50 && re.test(t);
+      });
+    return els.find((el) => el.getAttribute('role') === 'menuitem') || els[0] || null;
+  }
+
+  // Wait until `target` thumbnails are in the prompt bar. If Flow pops up a
+  // dialog after the upload (e.g. crop), confirm it.
+  async function waitThumbs(box, target, ms) {
+    const end = Date.now() + ms;
+    let confirmed = false;
+    while (Date.now() < end && !state.stopRequested) {
+      await sleep(400);
+      if (refThumbs(liveCard(box)).length >= target) return true;
+      if (!confirmed) {
+        for (const dlg of document.querySelectorAll('[role="dialog"], [aria-modal="true"]')) {
+          if (!isVisible(dlg) || host.contains(dlg)) continue;
+          const btn = [...dlg.querySelectorAll('button, [role="button"]')]
+            .filter(isVisible)
+            .find((b) => /^(crop( and save)?|done|confirm|save|add|use|insert|ok|upload)$/i.test(norm(b.innerText || b.getAttribute('aria-label') || '')));
+          if (btn) {
+            await trustedClickOn(btn);
+            confirmed = true;
+            break;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  // Three ways to attach a file, tried in order (the last one that worked goes first):
+  const ATTACH = {
+    // 1. An upload <input type=file> that belongs to the prompt bar.
+    async input(box, ref) {
+      const card = liveCard(box);
+      const scope = (card.parentElement && card.parentElement.parentElement) || card;
+      const input = scope.querySelector('input[type="file"]');
+      if (!input) return false;
+      const dt = new DataTransfer();
+      dt.items.add(dataUrlToFile(ref));
+      input.files = dt.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    },
+    // 2. What a person does: click "+", choose Upload – and we answer the file dialog.
+    async menu(box, ref) {
+      const card = liveCard(box);
+      const plus = [...card.querySelectorAll('button, [role="button"]')]
+        .filter(isVisible)
+        .find((b) => /^\+$|\badd\b|add_2|add_circle|attach|upload|add image|add media/i.test(buttonLabel(b)) && !BUTTON_RE.test(buttonLabel(b)));
+      if (!plus) return false;
+      const armed = await chrome.runtime.sendMessage({ type: 'armFileChooser', refs: [ref] });
+      if (!armed || !armed.ok) return false;
+      try {
+        await trustedClickOn(plus);
+        let res = await chrome.runtime.sendMessage({ type: 'awaitFileChooser', ms: 1500 });
+        if (!res.ok) {
+          await sleep(300);
+          const item = findMenuItem(/upload|from (your )?(computer|device)|browse|choose (a )?file|add image/i);
+          if (item) {
+            await trustedClickOn(item);
+            res = await chrome.runtime.sendMessage({ type: 'awaitFileChooser', ms: 4000 });
+          }
+        }
+        if (!res.ok) await trusted('trustedKey', { key: 'Escape' }); // close any menu we opened
+        return !!res.ok;
+      } finally {
+        await chrome.runtime.sendMessage({ type: 'disarmFileChooser' });
+      }
+    },
+    // 3. Drag-and-drop the file onto the prompt bar.
+    async drop(box, ref) {
+      const target = findPromptBox() || box;
+      const r = target.getBoundingClientRect();
+      const dt = new DataTransfer();
+      dt.items.add(dataUrlToFile(ref));
+      const opts = { bubbles: true, cancelable: true, composed: true, dataTransfer: dt, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+      for (const type of ['dragenter', 'dragover', 'drop']) target.dispatchEvent(new DragEvent(type, opts));
+      return true;
+    }
+  };
+
+  async function ensureReferences(box, index) {
+    if (!state.refs.length) return;
+    let have = refThumbs(liveCard(box)).length;
+    if (have >= state.refs.length) return; // still attached from the previous prompt
+
+    for (const ref of state.refs.slice(have)) {
+      const order = ['input', 'menu', 'drop'];
+      if (state.refMethod) order.sort((a, b) => (a === state.refMethod ? -1 : b === state.refMethod ? 1 : 0));
+      let ok = false;
+      for (const how of order) {
+        if (state.stopRequested) return;
+        let tried = false;
+        try {
+          tried = await ATTACH[how](box, ref);
+        } catch (e) {
+          log(`Reference attach (${how}) error: ${e.message}`);
+        }
+        if (tried && (await waitThumbs(box, have + 1, 20000))) {
+          ok = true;
+          state.refMethod = how;
+          have++;
+          log(`#${index + 1} reference "${ref.name}" attached`);
+          break;
+        }
+      }
+      if (!ok) throw new Error(`Could not attach reference image "${ref.name}" to Flow.`);
+    }
+    await sleep(1500); // let Flow finish processing the upload
+  }
+
+  function collectImages(skip) {
     const srcs = new Set();
     for (const img of document.querySelectorAll('img')) {
+      if (skip && skip.contains(img)) continue;
       if (img.complete && img.naturalWidth >= 256 && img.naturalHeight >= 256) {
         const src = img.currentSrc || img.src;
         if (src) srcs.add(src);
@@ -292,10 +462,15 @@
 
   async function runOne(index) {
     const p = state.prompts[index];
-    const box = findPromptBox();
+    let box = findPromptBox();
     if (!box) throw new Error('Prompt box not found – set a prompt selector under Advanced.');
 
-    const before = new Set(collectImages());
+    await ensureReferences(box, index);
+    box = findPromptBox() || box;
+
+    // Snapshot existing images (incl. the references) so only new results count.
+    const refSrcs = refThumbs(liveCard(box)).map((i) => i.currentSrc || i.src);
+    const before = new Set([...collectImages(), ...refSrcs]);
     setText(box, p.text);
     await sleep(800);
 
@@ -309,7 +484,7 @@
     let lastChange = Date.now();
     while (!state.stopRequested) {
       await sleep(1000);
-      const fresh = collectImages().filter((s) => !before.has(s));
+      const fresh = collectImages(liveCard(box)).filter((s) => !before.has(s));
       if (fresh.length !== lastCount) {
         lastCount = fresh.length;
         lastChange = Date.now();
@@ -349,32 +524,126 @@
     return u ? u[1].toLowerCase().replace('jpeg', 'jpg') : 'png';
   }
 
-  async function downloadImages(index, srcs) {
-    const prefix = `${state.settings.folder.replace(/[\\:*?"<>|]/g, '_')}/${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
+  // ---------- save folder: chosen once, then written to silently ----------
+
+  const IDB = {
+    db: null,
+    open() {
+      return (this.db ||= new Promise((res, rej) => {
+        const r = indexedDB.open('flowBatch', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('kv');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      }));
+    },
+    async get(k) {
+      const db = await this.open();
+      return new Promise((res, rej) => {
+        const r = db.transaction('kv').objectStore('kv').get(k);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    },
+    async set(k, v) {
+      const db = await this.open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction('kv', 'readwrite');
+        tx.objectStore('kv').put(v, k);
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+      });
+    }
+  };
+
+  const canPickFolder = typeof window.showDirectoryPicker === 'function';
+  let dirHandle = null;
+
+  async function chooseFolder() {
+    // Must be called from a click.
+    const h = await window.showDirectoryPicker({ id: 'flowbatch', mode: 'readwrite' });
+    dirHandle = h;
+    await IDB.set('dir', h);
+    log(`Images will be saved in folder "${h.name}"`);
+    renderFolder();
+    return h;
+  }
+
+  // interactive = called from a click, so Chrome may re-ask for permission once.
+  async function folderReady(interactive) {
+    if (!dirHandle) dirHandle = await IDB.get('dir').catch(() => null);
+    if (!dirHandle) return null;
+    let perm = await dirHandle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted' && interactive) perm = await dirHandle.requestPermission({ mode: 'readwrite' });
+    return perm === 'granted' ? dirHandle : null;
+  }
+
+  async function renderFolder() {
+    const el = $('folderName');
+    if (!canPickFolder) {
+      el.textContent = `Chrome Downloads/${state.settings.folder}`;
+      $('folderPick').hidden = true;
+      return;
+    }
+    if (!dirHandle) dirHandle = await IDB.get('dir').catch(() => null);
+    el.textContent = dirHandle ? `📁 ${dirHandle.name}` : 'not chosen yet';
+  }
+
+  async function getBlob(src) {
+    try {
+      const r = await fetch(src, { credentials: 'include' });
+      if (r.ok) return await r.blob();
+    } catch {
+      /* blocked by CORS – fetch through the background instead */
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'fetchDataUrl', url: src });
+    if (!res || !res.ok) throw new Error((res && res.error) || 'could not fetch image');
+    return (await fetch(res.dataUrl)).blob();
+  }
+
+  async function saveImages(index, srcs) {
+    const base = `${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
+    const runDir = state.runFolder || 'FlowBatch';
+    let target = null;
+    const dir = await folderReady(false);
+    if (dir) {
+      try {
+        target = await dir.getDirectoryHandle(runDir, { create: true });
+      } catch (e) {
+        log(`Folder error: ${e.message} – using Chrome Downloads instead`);
+      }
+    }
     let saved = 0;
     for (let k = 0; k < srcs.length; k++) {
-      let url = srcs[k];
-      let mime = '';
       try {
-        if (url.startsWith('blob:')) {
-          const blob = await (await fetch(url)).blob();
-          mime = blob.type;
-          url = await blobToDataUrl(blob);
-        } else if (url.startsWith('data:')) {
-          mime = url.slice(5, url.indexOf(';'));
+        const blob = await getBlob(srcs[k]);
+        const name = `${base}_${k + 1}.${extFor(srcs[k], blob.type)}`;
+        if (target) {
+          const fh = await target.getFileHandle(name, { create: true });
+          const w = await fh.createWritable();
+          await w.write(blob);
+          await w.close();
+        } else {
+          const folder = state.settings.folder.replace(/[\\:*?"<>|]/g, '_');
+          const res = await chrome.runtime.sendMessage({
+            type: 'download',
+            url: await blobToDataUrl(blob),
+            filename: `${folder}/${runDir}/${name}`
+          });
+          if (!res || !res.ok) throw new Error((res && res.error) || 'download failed');
         }
-        const res = await chrome.runtime.sendMessage({
-          type: 'download',
-          url,
-          filename: `${prefix}_${k + 1}.${extFor(srcs[k], mime)}`
-        });
-        if (res && res.ok) saved++;
-        else log(`Download failed: ${res && res.error}`);
+        saved++;
       } catch (e) {
-        log(`Download failed: ${e.message}`);
+        log(`Save failed: ${e.message}`);
       }
     }
     return saved;
+  }
+
+  function newRunFolder() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const name = (state.fileName || 'prompts').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]/g, '_');
+    return `${name}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
   }
 
   // ---------- run loop ----------
@@ -384,8 +653,14 @@
     state.running = true;
     state.paused = false;
     state.stopRequested = false;
+    // New run (nothing done yet) → new sub-folder; Resume keeps the old one.
+    if (!state.runFolder || !state.prompts.some((p) => p.status === 'done')) {
+      state.runFolder = newRunFolder();
+      save();
+    }
     render();
-    log('Started');
+    log(`Started – saving to ${dirHandle ? dirHandle.name : 'Chrome Downloads/' + state.settings.folder}/${state.runFolder}`);
+    if (state.refs.length) log(`Using ${state.refs.length} reference image(s) for every prompt`);
 
     for (let i = 0; i < state.prompts.length && !state.stopRequested; i++) {
       const p = state.prompts[i];
@@ -401,7 +676,7 @@
         p.images = fresh.length;
         if (status === 'timeout') log(`#${i + 1} timed out with no images`);
         if (fresh.length && state.settings.autoDownload) {
-          const n = await downloadImages(i, fresh);
+          const n = await saveImages(i, fresh);
           log(`#${i + 1} done – ${fresh.length} image(s), ${n} saved`);
         } else if (fresh.length) {
           log(`#${i + 1} done – ${fresh.length} image(s)`);
@@ -409,6 +684,11 @@
       } catch (e) {
         p.status = 'error';
         log(`#${i + 1} error: ${e.message}`);
+        // Without the references every result would be wrong – stop instead of wasting credits.
+        if (/reference image/i.test(e.message)) {
+          state.stopRequested = true;
+          log('Stopped so no credits are wasted. Check the reference images and press Resume.');
+        }
       }
       save();
       render();
@@ -464,6 +744,13 @@
         padding: 6px; max-height: 110px; overflow: auto; white-space: pre-wrap; color: #bdc1c6; }
       details summary { cursor: pointer; color: #9aa0a6; }
       label.chk { display: flex; gap: 6px; align-items: center; }
+      .refs { display: flex; gap: 8px; }
+      .refs:empty { display: none; }
+      .ref { position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden;
+        border: 1px solid #5f6368; }
+      .ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .ref button { position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 12px;
+        line-height: 16px; border-radius: 8px; background: rgba(0,0,0,.7); }
     </style>
     <div class="panel">
       <div class="head">
@@ -481,6 +768,16 @@
           <input type="file" id="file" accept=".txt,text/plain" hidden>
         </div>
         <div class="muted" id="fileInfo">No file loaded.</div>
+        <div class="row">
+          <button id="refPick">Reference images…</button>
+          <span class="muted" id="refInfo">optional · max 2 · used for every prompt</span>
+          <input type="file" id="refFile" accept="image/*" multiple hidden>
+        </div>
+        <div class="refs" id="refs"></div>
+        <div class="row">
+          <button id="folderPick">Save folder…</button>
+          <span class="muted" id="folderName"></span>
+        </div>
         <div class="bar"><div id="bar"></div></div>
         <div class="list" id="list"></div>
         <div class="row">
@@ -499,7 +796,7 @@
           </div>
           <label class="chk" style="margin-top:6px"><input type="checkbox" data-k="autoDownload"> Download images automatically</label>
           <div class="grid" style="grid-template-columns: 1fr 150px; margin-top:4px">
-            <span>Downloads sub-folder</span><input type="text" data-k="folder">
+            <span>Fallback Downloads sub-folder</span><input type="text" data-k="folder">
           </div>
         </details>
         <details>
@@ -569,6 +866,29 @@
     $('reset').disabled = state.running || !total;
     $('pick').disabled = state.running;
     $('splitMode').value = state.settings.splitMode;
+    $('refPick').disabled = state.running || state.refs.length >= 2;
+    $('folderPick').disabled = state.running;
+
+    const refs = $('refs');
+    refs.textContent = '';
+    state.refs.forEach((r, i) => {
+      const box = document.createElement('div');
+      box.className = 'ref';
+      box.title = r.name;
+      const img = document.createElement('img');
+      img.src = r.dataUrl;
+      const x = document.createElement('button');
+      x.textContent = '×';
+      x.title = 'Remove';
+      x.disabled = state.running;
+      x.onclick = () => {
+        state.refs.splice(i, 1);
+        save();
+        render();
+      };
+      box.append(img, x);
+      refs.append(box);
+    });
 
     for (const input of root.querySelectorAll('[data-k]')) {
       const v = state.settings[input.dataset.k];
@@ -608,7 +928,33 @@
     if (rawFileText) loadPrompts();
     else save();
   };
-  $('start').onclick = () => start();
+  $('refPick').onclick = () => $('refFile').click();
+  $('refFile').onchange = async () => {
+    const input = $('refFile');
+    const files = [...input.files].filter((f) => f.type.startsWith('image/'));
+    const room = 2 - state.refs.length;
+    if (files.length > room) log(`Only 2 reference images allowed – added the first ${room}`);
+    for (const f of files.slice(0, room)) {
+      state.refs.push({ name: f.name, dataUrl: await blobToDataUrl(f) });
+    }
+    input.value = '';
+    save();
+    render();
+  };
+  $('folderPick').onclick = () => chooseFolder().catch((e) => e.name !== 'AbortError' && log(`Folder: ${e.message}`));
+
+  $('start').onclick = async () => {
+    // This click is the last thing you do: settle the save folder now so
+    // nothing needs you during the run.
+    if (state.settings.autoDownload && canPickFolder) {
+      try {
+        if (!(await folderReady(true))) await chooseFolder();
+      } catch (e) {
+        log(`No save folder chosen – using Chrome Downloads/${state.settings.folder} instead`);
+      }
+    }
+    start();
+  };
   $('pause').onclick = () => {
     state.paused = !state.paused;
     log(state.paused ? 'Paused – will hold after the current prompt' : 'Continuing');
@@ -661,6 +1007,7 @@
   document.documentElement.appendChild(host);
   load().then(() => {
     render();
+    renderFolder();
     if (state.prompts.length) log(`Restored ${state.prompts.length} prompts from last session`);
   });
 })();
