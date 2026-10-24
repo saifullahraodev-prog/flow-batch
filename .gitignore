@@ -1,0 +1,4 @@
+# Chrome refuses to load an extension folder containing names starting with "_"
+__pycache__/
+*.pyc
+*.mp4

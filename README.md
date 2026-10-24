@@ -47,6 +47,21 @@ Progress is remembered: if the page reloads, the list comes back and **Resume**
 continues from the first prompt not yet done. **Reset** marks everything as
 not done again.
 
+## Make a video (images + audio)
+
+`video-maker/Make Video.bat` turns a run folder into a 1920×1080 MP4 for
+YouTube: the images in file-name order, each shown for an equal share of
+one audio file (voice-over or music).
+
+1. Install FFmpeg once: `winget install Gyan.FFmpeg`
+2. Double-click **Make Video.bat**.
+3. Pick the images folder and the audio file, click **Make video**.
+
+The MP4 is saved inside the images folder, named after it. By default only
+the first image of each prompt is used (`001_…_1`; if you deleted it, `_2`
+is used) – untick the option to use every image. Images of other sizes get
+white (or black) borders.
+
 ## Settings
 
 | Setting | Default | Meaning |
