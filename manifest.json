@@ -6,6 +6,7 @@
   "permissions": ["storage", "unlimitedStorage", "downloads", "debugger"],
   "host_permissions": [
     "https://flow.google.com/*",
+    "https://flow-content.google/*",
     "https://labs.google/*",
     "https://*.googleusercontent.com/*",
     "https://storage.googleapis.com/*"

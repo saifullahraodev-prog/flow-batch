@@ -93,6 +93,19 @@ the open Flow project, with no human interaction after pressing Start:
 2b. CDP clicks land on whatever is on top – set the panel host to
    `pointer-events: none` during each trusted click, or the panel can swallow
    the click when it overlaps Flow's button.
+2d. Flow's real reference flow (verified Oct 2026): "+" = button
+   `aria-label="Add ingredients to the prompt box"` opens a dialog
+   `role=dialog aria-label="Add assets to the project"`; its
+   `aria-label="Upload media"` button creates a hidden
+   `<input type=file multiple>`; the upload lands in the asset list as
+   `button[role=option].asset-item` with text "<filename> Image" (spinner /
+   "Uploading" while busy) – it is NOT attached until that option is clicked,
+   which closes the dialog and shows a 50×50 `<img>` in
+   `flow-prompt-box-instruction-card-wrapper`. Already-uploaded assets are
+   re-used by name. Submit button: `aria-label="Start generation"`; prompt box
+   is a ProseMirror `[role=textbox]`; the "Settings trigger" chip text ends in
+   `x<N>` = images per prompt. Media URLs are on `flow-content.google` (CORS:
+   fetch them from the background script).
 2c. `chrome.downloads` still shows "Save as" boxes when Chrome's "Ask where to
    save" setting is on – that's why saving uses the File System Access API.
 3. Flow moved domains once; keep URL matching in one place and support both.

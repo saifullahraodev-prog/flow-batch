@@ -126,7 +126,7 @@
   }
 
   // Labels / icon names the submit button might carry, and ones it never does.
-  const BUTTON_RE = /\b(generate|send|submit)\b|arrow_forward|arrow_upward/i;
+  const BUTTON_RE = /start generation|\b(generate|send|submit)\b|arrow_forward|arrow_upward/i;
   const NOT_SUBMIT_RE = /\b(close|clear|cancel|remove|delete|add|agent)\b/i;
 
   function buttonLabel(b) {
@@ -158,6 +158,8 @@
   function findGenerateButton(box) {
     const { buttonSelector } = state.settings;
     if (buttonSelector) return document.querySelector(buttonSelector);
+    const exact = liveCard(box).querySelector('button[aria-label="Start generation"]');
+    if (exact) return exact;
     const composer = findComposer(box);
     if (!composer) return null;
     const btns = composer.btns.filter((b) => !NOT_SUBMIT_RE.test(buttonLabel(b)));
@@ -340,8 +342,18 @@
     return els.find((el) => el.getAttribute('role') === 'menuitem') || els[0] || null;
   }
 
+  async function waitFor(fn, ms, every = 300) {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !state.stopRequested) {
+      const v = fn();
+      if (v) return v;
+      await sleep(every);
+    }
+    return null;
+  }
+
   // Wait until `target` thumbnails are in the prompt bar. If Flow pops up a
-  // dialog after the upload (e.g. crop), confirm it.
+  // confirm/crop dialog (not the asset picker), confirm it.
   async function waitThumbs(box, target, ms) {
     const end = Date.now() + ms;
     let confirmed = false;
@@ -350,10 +362,10 @@
       if (refThumbs(liveCard(box)).length >= target) return true;
       if (!confirmed) {
         for (const dlg of document.querySelectorAll('[role="dialog"], [aria-modal="true"]')) {
-          if (!isVisible(dlg) || host.contains(dlg)) continue;
+          if (!isVisible(dlg) || host.contains(dlg) || dlg === findAssetDialog()) continue;
           const btn = [...dlg.querySelectorAll('button, [role="button"]')]
             .filter(isVisible)
-            .find((b) => /^(crop( and save)?|done|confirm|save|add|use|insert|ok|upload)$/i.test(norm(b.innerText || b.getAttribute('aria-label') || '')));
+            .find((b) => /^(crop( and save)?|done|confirm|save|use|insert|ok)$/i.test(norm(b.innerText || b.getAttribute('aria-label') || '')));
           if (btn) {
             await trustedClickOn(btn);
             confirmed = true;
@@ -365,8 +377,94 @@
     return false;
   }
 
+  // ---- Flow's own flow: "+" → "Add assets to the project" dialog → Upload media → click the asset ----
+
+  function findPlusButton(card) {
+    return (
+      card.querySelector('button[aria-label="Add ingredients to the prompt box"]') ||
+      [...card.querySelectorAll('button, [role="button"]')]
+        .filter(isVisible)
+        .find((b) => /ingredient|^\+$|\badd\b|add_2|add_circle|attach|add image|add media/i.test(buttonLabel(b)) && !BUTTON_RE.test(buttonLabel(b)) && !/^ingredient$/i.test(b.getAttribute('aria-label') || ''))
+    );
+  }
+
+  function findAssetDialog() {
+    return (
+      [...document.querySelectorAll('[role="dialog"]')].find(
+        (d) => isVisible(d) && !host.contains(d) && (/asset/i.test(d.getAttribute('aria-label') || '') || d.querySelector('[aria-label="Asset list"], .asset-item'))
+      ) || null
+    );
+  }
+
+  function findAssetOption(dlg, name) {
+    return [...dlg.querySelectorAll('[role="option"], .asset-item')].filter(isVisible).find((o) => norm(o.innerText || '').includes(name)) || null;
+  }
+
+  const isUploading = (o) => /uploading/i.test(o.textContent || '') || !!o.querySelector('[role="progressbar"], mat-spinner');
+
+  async function closeAssetDialog() {
+    const dlg = findAssetDialog();
+    if (!dlg) return;
+    const close = [...dlg.querySelectorAll('button')].find((b) => /^close$/i.test(b.getAttribute('aria-label') || ''));
+    if (close) await trustedClickOn(close);
+    else await trusted('trustedKey', { key: 'Escape' });
+    await waitFor(() => !findAssetDialog(), 3000);
+  }
+
   // Three ways to attach a file, tried in order (the last one that worked goes first):
   const ATTACH = {
+    // 1. Flow's asset picker – re-uses the asset if it was uploaded before.
+    async picker(box, ref) {
+      const plus = findPlusButton(liveCard(box));
+      if (!plus) return false;
+      if (!findAssetDialog()) await trustedClickOn(plus);
+      let dlg = await waitFor(findAssetDialog, 5000);
+      if (!dlg) return false;
+
+      let opt = findAssetOption(dlg, ref.name);
+      if (!opt) {
+        const up = [...dlg.querySelectorAll('button, [role="button"]')]
+          .filter(isVisible)
+          .find((b) => /upload/i.test(buttonLabel(b)));
+        if (!up) {
+          await closeAssetDialog();
+          return false;
+        }
+        const armed = await chrome.runtime.sendMessage({ type: 'armFileChooser', refs: [ref] });
+        if (!armed || !armed.ok) {
+          await closeAssetDialog();
+          return false;
+        }
+        try {
+          await trustedClickOn(up);
+          const res = await chrome.runtime.sendMessage({ type: 'awaitFileChooser', ms: 6000 });
+          if (!res.ok) {
+            log(`Upload: ${res.error}`);
+            await closeAssetDialog();
+            return false;
+          }
+        } finally {
+          await chrome.runtime.sendMessage({ type: 'disarmFileChooser' });
+        }
+        log(`Uploading "${ref.name}" to the project…`);
+      }
+
+      // Wait until the asset is listed and finished uploading, then pick it.
+      opt = await waitFor(() => {
+        const d = findAssetDialog();
+        const o = d && findAssetOption(d, ref.name);
+        return o && !isUploading(o) ? o : null;
+      }, 120000, 500);
+      if (!opt) {
+        await closeAssetDialog();
+        return false;
+      }
+      await sleep(600);
+      await trustedClickOn(opt);
+      await waitFor(() => !findAssetDialog(), 3000);
+      if (findAssetDialog()) await closeAssetDialog();
+      return true;
+    },
     // 1. An upload <input type=file> that belongs to the prompt bar.
     async input(box, ref) {
       const card = liveCard(box);
@@ -380,12 +478,9 @@
       input.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     },
-    // 2. What a person does: click "+", choose Upload – and we answer the file dialog.
+    // 3. Generic menus: click "+", choose an Upload item – and we answer the file dialog.
     async menu(box, ref) {
-      const card = liveCard(box);
-      const plus = [...card.querySelectorAll('button, [role="button"]')]
-        .filter(isVisible)
-        .find((b) => /^\+$|\badd\b|add_2|add_circle|attach|upload|add image|add media/i.test(buttonLabel(b)) && !BUTTON_RE.test(buttonLabel(b)));
+      const plus = findPlusButton(liveCard(box));
       if (!plus) return false;
       const armed = await chrome.runtime.sendMessage({ type: 'armFileChooser', refs: [ref] });
       if (!armed || !armed.ok) return false;
@@ -424,7 +519,7 @@
     if (have >= state.refs.length) return; // still attached from the previous prompt
 
     for (const ref of state.refs.slice(have)) {
-      const order = ['input', 'menu', 'drop'];
+      const order = ['picker', 'input', 'menu', 'drop'];
       if (state.refMethod) order.sort((a, b) => (a === state.refMethod ? -1 : b === state.refMethod ? 1 : 0));
       let ok = false;
       for (const how of order) {
@@ -460,6 +555,13 @@
     return [...srcs];
   }
 
+  // Flow's settings chip reads e.g. "🍌 Nano Banana 2.1 crop_16_9 x2" – use its count.
+  function flowImageCount() {
+    const chip = document.querySelector('button[aria-label="Settings trigger"]');
+    const m = chip && (chip.innerText || '').match(/\bx(\d{1,2})\b/);
+    return m ? Number(m[1]) : 0;
+  }
+
   async function runOne(index) {
     const p = state.prompts[index];
     let box = findPromptBox();
@@ -478,7 +580,8 @@
       throw new Error('Flow did not accept the prompt – use Advanced → Test detection, or set the button selector.');
     }
 
-    const { perPrompt, stableSec, timeoutSec } = state.settings;
+    const { stableSec, timeoutSec } = state.settings;
+    const perPrompt = flowImageCount() || state.settings.perPrompt;
     const start = Date.now();
     let lastCount = 0;
     let lastChange = Date.now();
@@ -935,7 +1038,10 @@
     const room = 2 - state.refs.length;
     if (files.length > room) log(`Only 2 reference images allowed – added the first ${room}`);
     for (const f of files.slice(0, room)) {
-      state.refs.push({ name: f.name, dataUrl: await blobToDataUrl(f) });
+      // Names must be unique – the extension finds the uploaded asset in Flow by its name.
+      let name = f.name;
+      while (state.refs.some((r) => r.name === name)) name = name.replace(/(\.[^.]+)?$/, (ext) => `-2${ext}`);
+      state.refs.push({ name, dataUrl: await blobToDataUrl(f) });
     }
     input.value = '';
     save();
