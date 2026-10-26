@@ -135,21 +135,49 @@ nothing extra unless the release notes say so (then run `Setup.bat` again).
 
 ### Step 1 – Write the scene file
 
-Open Notepad and write one line per scene:
+**The idea:** your video is a series of *scenes*. In each scene, the narrator
+says a sentence (or a few) while one picture is on screen. The scene file is
+simply a list of those scenes – **one line per scene** – and each line says two
+things, separated by a `|` (the vertical bar, `Shift` + `\` on most keyboards):
 
 ```
-In 1912 the Titanic left Southampton on her first voyage. | stickman sailors waving from a huge ship leaving the port
-The captain was proud of his ship. | stickman captain smiling on the deck of a big ship
-On a cold April night, the lookout saw an iceberg. | stickman lookout in the crow's nest pointing at an iceberg
+what the narrator says   |   what the picture shows
 ```
 
-- **Left of `|`** = exactly what will be said in the narration.
-- **Right of `|`** = the picture shown while it is said.
-- Start a new line wherever the picture should change.
-- Save it with a meaningful name, e.g. `titanic.txt` – the run folder and the
-  video are named after it.
+**Example** – a 3-scene video:
 
-See [Scene file format](#scene-file-format) for all rules.
+```
+In 1912 the Titanic left Southampton. | stickman sailors waving from a huge ship leaving the port
+The captain was proud of his ship. | stickman captain smiling on the deck
+That night, the lookout saw an iceberg. | stickman lookout pointing at an iceberg
+```
+
+What each line becomes:
+
+| Scene | Narrator says (left of `\|`) | Picture on screen (right of `\|`) |
+|---|---|---|
+| 1 | "In 1912 the Titanic left Southampton." | sailors waving from a ship leaving port |
+| 2 | "The captain was proud of his ship." | the captain smiling on deck |
+| 3 | "That night, the lookout saw an iceberg." | the lookout pointing at an iceberg |
+
+- The **left side** is your narration script. You will read (or text-to-speech)
+  exactly this, in this order, in Step 6. It never goes to Flow.
+- The **right side** is the image prompt. Only this goes to Flow. Describe just
+  the scene – the shared look (*"2D stickman cartoon, white background"*) goes
+  in the panel's **Style box** in Step 3, so you don't repeat it on every line.
+- Start a new line wherever the picture should change. A scene can be one
+  short sentence or several sentences – as long as they stay on one line.
+
+**How to create it:**
+
+1. Open **Notepad**.
+2. Type your scenes, one per line, as above. (Tip: write the narration first,
+   one scene per line, then add `| prompt` at the end of each line.)
+3. **File → Save as**, choose a name like `titanic.txt`, and keep
+   *Encoding: UTF-8*. The run folder and the video will be named after it.
+
+A ready example is in [`sample-scenes.txt`](sample-scenes.txt). All rules are
+in [Scene file format](#scene-file-format).
 
 ### Step 2 – Prepare Google Flow
 
