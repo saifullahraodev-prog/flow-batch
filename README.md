@@ -49,13 +49,30 @@ not done again.
 
 ## Make a video (images + audio)
 
-`video-maker/Make Video.bat` turns a run folder into a 1920×1080 MP4 for
-YouTube: the images in file-name order, each shown for an equal share of
-one audio file (voice-over or music).
+`video-maker/Make Video.bat` turns a run folder plus one narration file
+into a 1920×1080 MP4 for YouTube, with **each image appearing when its line
+of narration starts**.
 
-1. Install FFmpeg once: `winget install Gyan.FFmpeg`
-2. Double-click **Make Video.bat**.
-3. Pick the images folder and the audio file, click **Make video**.
+One-time setup on each computer:
+
+```
+winget install Gyan.FFmpeg
+pip install faster-whisper
+```
+
+(The first video also downloads the ~480 MB speech model once.)
+
+1. Double-click **Make Video.bat**.
+2. Pick the images folder, the narration audio, and the **script** – a
+   `.txt` with the narration split into one line per image, in the same
+   order as the images.
+3. Click **Make video**.
+
+The narration is transcribed on your PC (nothing is uploaded) and each
+script line is matched to the moment it is spoken; small differences
+between script and recording are fine. A `<name>_timings.csv` next to the
+video lists when every image starts. Leave the script empty to give every
+image an equal share of the audio instead.
 
 The MP4 is saved inside the images folder, named after it. By default only
 the first image of each prompt is used (`001_…_1`; if you deleted it, `_2`
