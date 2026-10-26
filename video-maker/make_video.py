@@ -84,8 +84,57 @@ def pick_images(folder, first_per_prompt):
 
 
 def read_script(path):
+    """Narration lines. Scene-file lines "narration | image prompt" keep only the narration."""
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
-    return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    lines = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    return [line.split("|", 1)[0].strip() if "|" in line else line for line in lines]
+
+
+def scene_number(path):
+    m = re.match(r"(\d+)_", path.name)
+    return int(m.group(1)) if m else None
+
+
+def find_script(folder, script):
+    """The script picked by hand, else the scenes.txt Flow Batch saved in the folder."""
+    if script:
+        return Path(script)
+    auto = Path(folder) / "scenes.txt"
+    return auto if auto.is_file() else None
+
+
+def plan_scenes(folder, first_per_prompt, script=None):
+    """Pair images with narration lines.
+
+    Returns a dict: script (Path or None), lines (narration per scene or None),
+    scenes (list of image lists, one per scene), missing (scene numbers with no
+    image), extra (images with no scene).
+    """
+    images = pick_images(folder, first_per_prompt)
+    path = find_script(folder, script)
+    if not path:
+        return {"script": None, "lines": None, "scenes": [[p] for p in images], "missing": [], "extra": []}
+    lines = read_script(path)
+    numbered = [p for p in images if scene_number(p)]
+    if numbered:
+        # Flow Batch file names start with the scene number: 001_…, 002_… – match by number,
+        # so a failed or deleted image can't shift every later image. Images without a
+        # number (a thumbnail, a screenshot…) are left out.
+        scenes, extra = [[] for _ in lines], [p for p in images if not scene_number(p)]
+        for p in numbered:
+            n = scene_number(p)
+            (scenes[n - 1] if 1 <= n <= len(lines) else extra).append(p)
+    else:
+        if len(images) != len(lines):
+            raise RuntimeError(
+                f"The script has {len(lines)} lines but there are {len(images)} images, and the image "
+                "names don't start with scene numbers (001_…), so they can't be paired."
+            )
+        scenes, extra = [[p] for p in images], []
+    missing = [i + 1 for i, s in enumerate(scenes) if not s]
+    if len(missing) == len(scenes):
+        raise RuntimeError("None of the scenes has an image – is this the right folder for this script?")
+    return {"script": path, "lines": lines, "scenes": scenes, "missing": missing, "extra": extra}
 
 
 # ---------- narration matching ----------
@@ -186,22 +235,16 @@ def scene_starts(lines, spoken, total):
 
 # ---------- build ----------
 
-def build_video(images, audio, output, background, on_progress, script=None, on_status=lambda s: None):
-    """Make the MP4. Returns (total_seconds, durations, note)."""
+def build_video(plan, audio, output, background, on_progress, on_status=lambda s: None):
+    """Make the MP4 from plan_scenes(). Returns (total_seconds, durations, note)."""
     ffmpeg, ffprobe = find_tool("ffmpeg"), find_tool("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg is not installed.\n\nInstall it once by running this in a terminal:\n\nwinget install Gyan.FFmpeg\n\nthen open this tool again.")
 
     total = audio_duration(ffprobe, audio)
+    scenes, lines = plan["scenes"], plan["lines"]
     note = ""
-    if script:
-        lines = read_script(script)
-        if len(lines) != len(images):
-            raise RuntimeError(
-                f"The script has {len(lines)} lines but {len(images)} images will be used.\n\n"
-                "Each image needs exactly one line of narration (same order). "
-                "Fix the script, or delete/add images, then try again."
-            )
+    if lines:
         # Progress: 0–50 % listening, 50–65 % images, 65–100 % video.
         spoken = transcribe_words(ffmpeg, audio, total, lambda f: on_progress(0.5 * f), on_status)
         starts, matched = scene_starts(lines, spoken, total)
@@ -210,17 +253,36 @@ def build_video(images, audio, output, background, on_progress, script=None, on_
             note += " That is low – check that the script matches this audio."
         p0, p_img = 0.5, 0.15
     else:
-        lines = [""] * len(images)
-        starts = [total * i / len(images) for i in range(len(images))]
+        lines = [""] * len(scenes)
+        starts = [total * i / len(scenes) for i in range(len(scenes))]
         p0, p_img = 0.0, 0.3
-    durations = [b - a for a, b in zip(starts, starts[1:] + [total])]
+    scene_len = [b - a for a, b in zip(starts, starts[1:] + [total])]
+
+    # Turn scenes into shots (image, start, seconds). A scene without an image keeps
+    # the previous image on screen; several images in one scene share its time.
+    shots, carry = [], 0.0
+    for imgs, s, d in zip(scenes, starts, scene_len):
+        if not imgs:
+            if shots:
+                img, s0, d0 = shots[-1]
+                shots[-1] = (img, s0, d0 + d)
+            else:
+                carry += d  # missing first scene(s): the first image starts at 0
+            continue
+        s, d = s - carry, d + carry
+        carry = 0.0
+        for k, img in enumerate(imgs):
+            shots.append((img, s + d * k / len(imgs), d / len(imgs)))
+    images = [img for img, _, _ in shots]
+    durations = [d for _, _, d in shots]
 
     # Timing sheet next to the video, to check or share.
     with open(output.with_name(output.stem + "_timings.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["scene", "image", "starts_at", "seconds", "narration"])
-        for i, (img, s, d, line) in enumerate(zip(images, starts, durations, lines), 1):
-            w.writerow([i, img.name, f"{int(s // 60)}:{s % 60:05.2f}", f"{d:.2f}", line])
+        for i, (imgs, s, d, line) in enumerate(zip(scenes, starts, scene_len, lines), 1):
+            name = " + ".join(p.name for p in imgs) or "(no image - previous one stays)"
+            w.writerow([i, name, f"{int(s // 60)}:{s % 60:05.2f}", f"{d:.2f}", line])
 
     on_status(f"Preparing {len(images)} images…")
     with tempfile.TemporaryDirectory(prefix="flowbatch_") as tmp:
@@ -289,7 +351,7 @@ class App(tk.Tk):
         self.script = tk.StringVar()
         self.first_only = tk.BooleanVar(value=True)
         self.bg = tk.StringVar(value="white")
-        self.status = tk.StringVar(value="Pick the images folder, the narration and its script.")
+        self.status = tk.StringVar(value="Pick the images folder and the narration audio.")
 
         pad = {"padx": 10, "pady": 5}
         frm = ttk.Frame(self, padding=12)
@@ -303,10 +365,11 @@ class App(tk.Tk):
         ttk.Entry(frm, textvariable=self.audio, width=55).grid(row=1, column=1, **pad)
         ttk.Button(frm, text="Browse…", command=self.pick_audio).grid(row=1, column=2, **pad)
 
-        ttk.Label(frm, text="3. Script (.txt)").grid(row=2, column=0, sticky="w", **pad)
+        ttk.Label(frm, text="3. Script (optional)").grid(row=2, column=0, sticky="w", **pad)
         ttk.Entry(frm, textvariable=self.script, width=55).grid(row=2, column=1, **pad)
         ttk.Button(frm, text="Browse…", command=self.pick_script).grid(row=2, column=2, **pad)
-        ttk.Label(frm, text="One line of narration per image, same order. Leave empty for equal timing.",
+        ttk.Label(frm, text="Not needed if the folder has scenes.txt from Flow Batch. "
+                            "No script at all = equal timing.",
                   foreground="#666").grid(row=3, column=1, columnspan=2, sticky="w", padx=10)
 
         opts = ttk.Frame(frm)
@@ -346,15 +409,27 @@ class App(tk.Tk):
             self.script.set(f)
             self.refresh_count()
 
+    def describe(self, plan):
+        n_img = sum(len(s) for s in plan["scenes"])
+        if not plan["script"]:
+            return f"{n_img} image(s), no script – each image gets an equal share of the audio."
+        src = "scenes.txt in the folder" if plan["script"].name == "scenes.txt" and not self.script.get() else plan["script"].name
+        text = f"{len(plan['scenes'])} scenes (from {src}), {n_img} image(s)."
+        if plan["missing"]:
+            text += f"  ✗ No image for scene(s) {', '.join(map(str, plan['missing']))}."
+        else:
+            text += "  ✓ Every scene has an image."
+        if plan["extra"]:
+            text += f"  {len(plan['extra'])} other image(s) don't belong to a scene and are left out."
+        return text
+
     def refresh_count(self):
         if not (self.folder.get() and Path(self.folder.get()).is_dir()):
             return
-        n = len(pick_images(self.folder.get(), self.first_only.get()))
-        text = f"{n} image(s) will be used, in file-name order."
-        if self.script.get() and Path(self.script.get()).is_file():
-            k = len(read_script(self.script.get()))
-            text += f"  Script: {k} line(s)" + ("  ✓" if k == n else "  ✗ must match the number of images")
-        self.count.config(text=text)
+        try:
+            self.count.config(text=self.describe(plan_scenes(self.folder.get(), self.first_only.get(), self.script.get().strip() or None)))
+        except Exception as e:
+            self.count.config(text=f"✗ {e}")
 
     def start(self):
         folder, audio, script = self.folder.get(), self.audio.get(), self.script.get().strip()
@@ -364,10 +439,24 @@ class App(tk.Tk):
             return messagebox.showwarning("Make Video", "Pick the narration audio first.")
         if script and not Path(script).is_file():
             return messagebox.showwarning("Make Video", "The script file wasn't found.")
-        images = pick_images(folder, self.first_only.get())
-        if not images:
+        try:
+            plan = plan_scenes(folder, self.first_only.get(), script or None)
+        except Exception as e:
+            return messagebox.showerror("Make Video", str(e))
+        if not any(plan["scenes"]):
             return messagebox.showwarning("Make Video", "No images (.png/.jpg/.webp) in that folder.")
+        if plan["missing"]:
+            gaps = ", ".join(map(str, plan["missing"]))
+            if not messagebox.askyesno(
+                "Make Video",
+                f"Scene(s) {gaps} have no image (failed or deleted).\n\n"
+                "Make the video anyway? The previous image stays on screen during those scenes.\n\n"
+                "Or click No, use \"Retry failed\" in Flow Batch, and come back.",
+            ):
+                return
         output = Path(folder) / f"{Path(folder).name}.mp4"
+        images = [p for s in plan["scenes"] for p in s]
+        script = plan["script"]
 
         self.go.config(state="disabled")
         self.bar["value"] = 0
@@ -380,7 +469,7 @@ class App(tk.Tk):
 
         def work():
             try:
-                total, durations, note = build_video(images, audio, output, self.bg.get(), progress, script or None, status)
+                total, durations, note = build_video(plan, audio, output, self.bg.get(), progress, status)
                 mode = "matched to the narration" if script else "equal timing"
                 msg = (f"Done! {output}\n{len(images)} images, {total:.0f} s, {mode} "
                        f"(shortest {min(durations):.1f} s, longest {max(durations):.1f} s). {note}\n"

@@ -1,0 +1,8 @@
+# Scene file: one line per scene  ->  narration | image prompt
+# Put the shared look in the panel's Style box, e.g.:
+#   2D stickman cartoon, flat colours, white background
+In 1912 the Titanic left Southampton on her first voyage. | stickman sailors waving from a huge ship leaving the port
+The captain was proud of his ship. | stickman captain smiling on the deck of a big ship
+On a cold April night, the lookout saw an iceberg. | stickman lookout in the crow's nest pointing at an iceberg
+It was too late to turn. | big ship hitting an iceberg at night
+The ship sank in less than three hours. | ship sinking into a dark sea, lifeboats nearby

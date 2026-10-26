@@ -11,6 +11,7 @@
     delaySec: 5,           // pause between prompts
     autoDownload: true,
     folder: 'FlowBatch',   // only used if no save folder was chosen (Chrome Downloads fallback)
+    style: '',             // added in front of every prompt, e.g. "2D stickman cartoon, flat colours"
     promptSelector: '',    // optional CSS overrides if auto-detection fails
     buttonSelector: ''
   };
@@ -72,6 +73,19 @@
         ? clean.split(/\n\s*\n/)
         : clean.split('\n').filter((l) => !l.trim().startsWith('#'));
     return parts.map((s) => s.trim()).filter(Boolean);
+  }
+
+  // Scene file lines are "narration | image prompt"; plain lines are just a prompt.
+  function splitScene(line) {
+    const bar = line.indexOf('|');
+    if (bar < 0) return { text: line, narration: '' };
+    return { narration: line.slice(0, bar).trim(), text: line.slice(bar + 1).trim() };
+  }
+
+  // What is actually typed into Flow: the style line + the scene's prompt.
+  function fullPrompt(p) {
+    const style = (state.settings.style || '').trim().replace(/[\s,.;:]+$/, '');
+    return style ? `${style}, ${p.text}` : p.text;
   }
 
   // ---------- page automation ----------
@@ -646,10 +660,11 @@
     // Snapshot existing images (incl. the references) so only new results count.
     const refKeys = [...liveCard(box).querySelectorAll('img')].map((i) => i.currentSrc || i.src).filter(Boolean).map(imageKey);
     const before = new Set([...collectImages().keys(), ...refKeys]);
-    setText(box, p.text);
+    const prompt = fullPrompt(p);
+    setText(box, prompt);
     await sleep(800);
 
-    if (!(await submitPrompt(box, p.text, index))) {
+    if (!(await submitPrompt(box, prompt, index))) {
       throw new Error('Flow did not accept the prompt – use Advanced → Test detection, or set the button selector.');
     }
 
@@ -776,18 +791,48 @@
     return (await fetch(res.dataUrl)).blob();
   }
 
-  async function saveImages(index, srcs) {
-    const base = `${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
+  // Write one file into this run's folder (chosen save folder, or Chrome Downloads).
+  async function writeToRun(name, blob) {
     const runDir = state.runFolder || 'FlowBatch';
-    let target = null;
     const dir = await folderReady(false);
     if (dir) {
       try {
-        target = await dir.getDirectoryHandle(runDir, { create: true });
+        const target = await dir.getDirectoryHandle(runDir, { create: true });
+        const fh = await target.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        return;
       } catch (e) {
         log(`Folder error: ${e.message} – using Chrome Downloads instead`);
       }
     }
+    const folder = state.settings.folder.replace(/[\\:*?"<>|]/g, '_');
+    const res = await chrome.runtime.sendMessage({
+      type: 'download',
+      url: await blobToDataUrl(blob),
+      filename: `${folder}/${runDir}/${name}`
+    });
+    if (!res || !res.ok) throw new Error((res && res.error) || 'download failed');
+  }
+
+  // Save scenes.txt next to the images: Make Video reads the narration from it.
+  async function saveSceneFile() {
+    if (!state.prompts.some((p) => p.narration)) return;
+    const lines = [
+      '# Scene file written by Flow Batch - one line per image: narration | image prompt',
+      ...state.prompts.map((p) => `${p.narration || ''} | ${p.text}`)
+    ];
+    try {
+      await writeToRun('scenes.txt', new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/plain' }));
+      log('Saved scenes.txt (narration for Make Video) in the run folder');
+    } catch (e) {
+      log(`Could not save scenes.txt: ${e.message}`);
+    }
+  }
+
+  async function saveImages(index, srcs) {
+    const base = `${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
     let saved = 0;
     const hashes = new Set();
     for (let k = 0; k < srcs.length; k++) {
@@ -798,21 +843,7 @@
         const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
         if (hashes.has(hash)) continue;
         hashes.add(hash);
-        const name = `${base}_${saved + 1}.${extFor(srcs[k], blob.type)}`;
-        if (target) {
-          const fh = await target.getFileHandle(name, { create: true });
-          const w = await fh.createWritable();
-          await w.write(blob);
-          await w.close();
-        } else {
-          const folder = state.settings.folder.replace(/[\\:*?"<>|]/g, '_');
-          const res = await chrome.runtime.sendMessage({
-            type: 'download',
-            url: await blobToDataUrl(blob),
-            filename: `${folder}/${runDir}/${name}`
-          });
-          if (!res || !res.ok) throw new Error((res && res.error) || 'download failed');
-        }
+        await writeToRun(`${base}_${saved + 1}.${extFor(srcs[k], blob.type)}`, blob);
         saved++;
       } catch (e) {
         log(`Save failed: ${e.message}`);
@@ -843,6 +874,8 @@
     render();
     log(`Started – saving to ${dirHandle ? dirHandle.name : 'Chrome Downloads/' + state.settings.folder}/${state.runFolder}`);
     if (state.refs.length) log(`Using ${state.refs.length} reference image(s) for every prompt`);
+    if ((state.settings.style || '').trim()) log(`Style added to every prompt: "${state.settings.style.trim()}"`);
+    if (state.settings.autoDownload) await saveSceneFile();
 
     for (let i = 0; i < state.prompts.length && !state.stopRequested; i++) {
       const p = state.prompts[i];
@@ -950,6 +983,9 @@
           <input type="file" id="file" accept=".txt,text/plain" hidden>
         </div>
         <div class="muted" id="fileInfo">No file loaded.</div>
+        <input type="text" data-k="style" placeholder="Style for every prompt, e.g. 2D stickman cartoon, flat colours, white background"
+          title="Added in front of every prompt, so all images share one look">
+
         <div class="row">
           <button id="refPick">Reference images…</button>
           <span class="muted" id="refInfo">optional · max 2 · used for every prompt</span>
@@ -966,6 +1002,7 @@
           <button class="primary" id="start">Start</button>
           <button id="pause">Pause</button>
           <button id="stop">Stop</button>
+          <button id="retry" title="Run again only the prompts that failed (❌) or timed out (⚠️)">Retry failed</button>
           <button id="reset" title="Mark every prompt as not done">Reset</button>
         </div>
         <details>
@@ -1015,7 +1052,7 @@
       const row = document.createElement('div');
       row.className = 'item' + (p.status === 'running' ? ' running' : '');
       row.dataset.i = i;
-      row.title = p.text;
+      row.title = (p.narration ? `Narration: ${p.narration}\n` : '') + `Prompt: ${fullPrompt(p)}`;
       const icon = document.createElement('span');
       icon.textContent = ICON[p.status] || '○';
       const num = document.createElement('span');
@@ -1034,14 +1071,18 @@
     if (running) running.scrollIntoView({ block: 'nearest' });
 
     const done = state.prompts.filter((p) => p.status === 'done').length;
+    const failed = state.prompts.filter((p) => p.status === 'error' || p.status === 'timeout').length;
+    const pending = state.prompts.filter((p) => p.status === 'pending').length;
     const total = state.prompts.length;
     $('bar').style.width = total ? `${(done / total) * 100}%` : '0';
     $('fileInfo').textContent = total
-      ? `${state.fileName || 'Prompts'} – ${total} prompts, ${done} done`
+      ? `${state.fileName || 'Prompts'} – ${total} prompts, ${done} done` + (failed ? `, ${failed} failed` : '')
       : 'No file loaded.';
 
-    $('start').disabled = state.running || !total;
-    $('start').textContent = done > 0 && done < total ? 'Resume' : 'Start';
+    $('start').disabled = state.running || !pending;
+    $('start').textContent = done + failed > 0 && pending ? 'Resume' : 'Start';
+    $('retry').disabled = state.running || !failed;
+    $('retry').textContent = failed ? `Retry failed (${failed})` : 'Retry failed';
     $('pause').disabled = !state.running;
     $('pause').textContent = state.paused ? 'Continue' : 'Pause';
     $('stop').disabled = !state.running;
@@ -1084,14 +1125,18 @@
   let rawFileText = '';
 
   function loadPrompts() {
-    state.prompts = parsePrompts(rawFileText, state.settings.splitMode).map((text) => ({
-      text,
+    state.prompts = parsePrompts(rawFileText, state.settings.splitMode).map((line) => ({
+      ...splitScene(line),
       status: 'pending',
       images: 0
     }));
+    state.runFolder = ''; // new file → new run folder
     save();
     render();
-    log(`Loaded ${state.prompts.length} prompts`);
+    const scenes = state.prompts.filter((p) => p.narration).length;
+    log(`Loaded ${state.prompts.length} prompts` + (scenes ? ` (scene file: ${scenes} with narration)` : ''));
+    const empty = state.prompts.findIndex((p) => !p.text);
+    if (empty >= 0) log(`⚠ Line ${empty + 1} has narration but no image prompt after "|"`);
   }
 
   $('pick').onclick = () => $('file').click();
@@ -1148,6 +1193,22 @@
   $('stop').onclick = () => {
     state.stopRequested = true;
     log('Stopping…');
+  };
+  $('retry').onclick = async () => {
+    // Only the failed ones: start() skips prompts that are done.
+    state.prompts.forEach((p) => {
+      if (p.status === 'error' || p.status === 'timeout') p.status = 'pending';
+    });
+    save();
+    if (state.settings.autoDownload && canPickFolder) {
+      try {
+        await folderReady(true);
+      } catch {
+        /* falls back to Chrome Downloads */
+      }
+    }
+    log('Retrying the failed prompts…');
+    start();
   };
   $('reset').onclick = () => {
     state.prompts.forEach((p) => {

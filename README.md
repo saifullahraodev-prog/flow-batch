@@ -12,6 +12,27 @@ folder you choose. After you press Start, nothing needs you until it's done.
 3. Click **Load unpacked** and select this `flow-batch` folder.
 4. Pin the extension (puzzle icon → pin) so its icon is on the toolbar.
 
+## Scene file (recommended)
+
+One `.txt` drives both the images and the video. Each line is one scene:
+
+```
+In 1912 the Titanic left Southampton. | stickman sailors waving from a huge ship leaving the port
+The captain was proud. | stickman captain smiling on the deck
+```
+
+Left of `|` is the narration, right of `|` is the image prompt. Flow Batch
+sends only the prompt to Flow, and saves a `scenes.txt` next to the images
+so **Make Video** knows the narration without a separate script. Plain
+prompt files (no `|`) still work.
+
+**Style box** (under the file name in the panel): text added in front of
+every prompt, e.g. `2D stickman cartoon, flat colours, white background` –
+keeps every image in the same look.
+
+**Retry failed (N)**: after a run, re-runs only the prompts that failed (❌)
+or timed out (⚠️), saving into the same folder.
+
 ## Use
 
 1. Open Flow, sign in, open or create a project, and switch the prompt bar to
@@ -61,10 +82,15 @@ If it installs Python, close the window and run it once more.
 (By hand instead: `winget install Gyan.FFmpeg` and `pip install faster-whisper`.)
 
 1. Double-click **Make Video.bat**.
-2. Pick the images folder, the narration audio, and the **script** – a
-   `.txt` with the narration split into one line per image, in the same
-   order as the images.
+2. Pick the images folder and the narration audio. If the folder came from a
+   run with a scene file, its `scenes.txt` is used automatically; otherwise
+   pick a **script** – a `.txt` with one line of narration per image.
 3. Click **Make video**.
+
+Images are paired with scenes by their number (`001_…` = scene 1), so a
+failed or deleted image never shifts the others. If a scene has no image the
+tool tells you which one; you can retry it in Flow Batch first, or go ahead
+and the previous image stays on screen for that scene.
 
 The narration is transcribed on your PC (nothing is uploaded) and each
 script line is matched to the moment it is spoken; small differences
