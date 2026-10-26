@@ -53,14 +53,12 @@ not done again.
 into a 1920×1080 MP4 for YouTube, with **each image appearing when its line
 of narration starts**.
 
-One-time setup on each computer:
+One-time setup on each computer: double-click **`video-maker/Setup.bat`**.
+It checks/installs Python, FFmpeg and the speech library, and downloads the
+~480 MB speech model, skipping anything already there (safe to run again).
+If it installs Python, close the window and run it once more.
 
-```
-winget install Gyan.FFmpeg
-pip install faster-whisper
-```
-
-(The first video also downloads the ~480 MB speech model once.)
+(By hand instead: `winget install Gyan.FFmpeg` and `pip install faster-whisper`.)
 
 1. Double-click **Make Video.bat**.
 2. Pick the images folder, the narration audio, and the **script** – a
