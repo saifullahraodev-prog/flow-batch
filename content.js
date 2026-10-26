@@ -602,16 +602,30 @@
     await sleep(1500); // let Flow finish processing the upload
   }
 
+  // One key per actual image. On wide screens Flow shows a new result twice (grid
+  // tile + large preview) with different URLs for the same image – both carry the
+  // same flow-content.google/image/<id>, so key on that id.
+  function imageKey(src) {
+    const m = src.match(/flow-content\.google\/image\/([^/?#]+)/);
+    if (m) return `flow:${m[1]}`;
+    if (/^(blob|data):/.test(src)) return src;
+    return src.split(/[?#]/)[0];
+  }
+
+  // Map of image key → URL of its largest copy on the page.
   function collectImages(skip) {
-    const srcs = new Set();
+    const found = new Map();
     for (const img of document.querySelectorAll('img')) {
       if (skip && skip.contains(img)) continue;
       if (img.complete && img.naturalWidth >= 256 && img.naturalHeight >= 256) {
         const src = img.currentSrc || img.src;
-        if (src) srcs.add(src);
+        if (!src) continue;
+        const key = imageKey(src);
+        const prev = found.get(key);
+        if (!prev || img.naturalWidth > prev.w) found.set(key, { src, w: img.naturalWidth });
       }
     }
-    return [...srcs];
+    return new Map([...found].map(([k, v]) => [k, v.src]));
   }
 
   // Flow's settings chip reads e.g. "🍌 Nano Banana 2.1 crop_16_9 x2" – use its count.
@@ -630,8 +644,8 @@
     box = findPromptBox() || box;
 
     // Snapshot existing images (incl. the references) so only new results count.
-    const refSrcs = [...liveCard(box).querySelectorAll('img')].map((i) => i.currentSrc || i.src).filter(Boolean);
-    const before = new Set([...collectImages(), ...refSrcs]);
+    const refKeys = [...liveCard(box).querySelectorAll('img')].map((i) => i.currentSrc || i.src).filter(Boolean).map(imageKey);
+    const before = new Set([...collectImages().keys(), ...refKeys]);
     setText(box, p.text);
     await sleep(800);
 
@@ -646,7 +660,7 @@
     let lastChange = Date.now();
     while (!state.stopRequested) {
       await sleep(1000);
-      const fresh = collectImages(liveCard(box)).filter((s) => !before.has(s));
+      const fresh = [...collectImages(liveCard(box))].filter(([k]) => !before.has(k)).map(([, src]) => src);
       if (fresh.length !== lastCount) {
         lastCount = fresh.length;
         lastChange = Date.now();
@@ -775,10 +789,16 @@
       }
     }
     let saved = 0;
+    const hashes = new Set();
     for (let k = 0; k < srcs.length; k++) {
       try {
         const blob = await getBlob(srcs[k]);
-        const name = `${base}_${k + 1}.${extFor(srcs[k], blob.type)}`;
+        // Skip byte-identical copies (same image reached through two URLs).
+        const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+        const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        if (hashes.has(hash)) continue;
+        hashes.add(hash);
+        const name = `${base}_${saved + 1}.${extFor(srcs[k], blob.type)}`;
         if (target) {
           const fh = await target.getFileHandle(name, { create: true });
           const w = await fh.createWritable();
@@ -916,7 +936,7 @@
     </style>
     <div class="panel">
       <div class="head">
-        <b>Flow Batch</b>
+        <b>Flow Batch <span class="muted" id="ver"></span></b>
         <button class="icon" id="min" title="Minimise">–</button>
         <button class="icon" id="close" title="Hide (click the toolbar icon to show again)">×</button>
       </div>
@@ -1173,9 +1193,12 @@
   if (window.__flowBatchTest) Object.assign(window.__flowBatchTest, { state, ensureReferences, findPromptBox, findGenerateButton, refThumbs, liveCard, flowImageCount });
 
   document.documentElement.appendChild(host);
+  const version = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '';
+  $('ver').textContent = version ? `v${version}` : '';
   load().then(() => {
     render();
     renderFolder();
+    log(`Flow Batch v${version} ready (screen ${window.innerWidth}×${window.innerHeight})`);
     if (state.prompts.length) log(`Restored ${state.prompts.length} prompts from last session`);
   });
 })();
