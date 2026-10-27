@@ -380,6 +380,26 @@ Images are paired by the **number at the start of their file name**
 | Images without a scene number (e.g. `thumbnail.png`) | Left out |
 | Your own images without numbers + a script | Paired in name order; the number of images must equal the number of lines |
 
+### Try it with the test pack
+
+`video-maker/test-pack/` is a ready-made example: 6 images (each shows
+**SCENE n** and its narration line), a 33-second spoken `narration.mp3`, and a
+`scenes.txt` – exactly what a Flow Batch run leaves behind.
+
+1. Copy the `test-pack` folder somewhere (e.g. the Desktop), so the test video
+   isn't created inside the repository.
+2. **Make Video.bat** → *Images folder*: the copy, *Narration audio*: its
+   `narration.mp3`, *Script*: leave empty.
+3. The summary should say *"6 scenes (from scenes.txt in the folder), 6 image(s).
+   ✓ Every scene has an image."* → **Make video**.
+4. Play the video: each "SCENE n" card should appear just as its sentence
+   starts. Expected starts: 0:00, 0:07.3, 0:12.1, 0:17.2, 0:22.2, 0:26.9
+   (also listed in the `_timings.csv`).
+
+To test a missing scene, delete `003_…png` from your copy before step 2: the
+tool reports *"No image for scene(s) 3"*, and if you continue, SCENE 2 stays
+on screen until scene 4 starts.
+
 ### Output
 
 - `<folder name>.mp4` – 1920×1080, 30 fps, H.264 video, AAC 192 kbps audio,
