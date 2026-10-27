@@ -46,7 +46,24 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [3/4] Speech library installed.
+rem Installed is not enough - check it actually loads in this Python.
+python -B -c "import faster_whisper, ctranslate2" >nul 2>&1
+if errorlevel 1 (
+    echo     The speech library is installed but doesn't load yet - installing the
+    echo     Microsoft Visual C++ Redistributable it needs...
+    winget install --id Microsoft.VCRedist.2015+.x64 -e --accept-source-agreements --accept-package-agreements
+    python -B -c "import faster_whisper, ctranslate2" >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo     The speech library still doesn't load. The error was:
+        python -B -c "import faster_whisper, ctranslate2"
+        echo.
+        echo     Send a screenshot of this window for help.
+        pause
+        exit /b 1
+    )
+)
+for /f "delims=" %%p in ('python -c "import sys; print(sys.executable)"') do echo [3/4] Speech library installed and working ^(Python: %%p^).
 
 rem ---- 4. speech model ----
 echo [4/4] Downloading the speech model (~480 MB, only the first time)...

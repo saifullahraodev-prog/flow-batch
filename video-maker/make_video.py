@@ -160,6 +160,27 @@ def load_audio_16k(ffmpeg, audio):
     return np.frombuffer(r.stdout, dtype=np.float32)
 
 
+def speech_import_help(err):
+    """Explain why faster-whisper can't be loaded – with the real error and which Python ran."""
+    detail = f"{type(err).__name__}: {err}"
+    where = f"Python used: {sys.executable}"
+    if isinstance(err, ModuleNotFoundError) and (err.name or "").split(".")[0] in ("faster_whisper", "ctranslate2", "av", "onnxruntime", "tokenizers"):
+        return (
+            "The speech library isn't installed for the Python that runs this tool.\n\n"
+            "Fix: double-click Setup.bat again (it installs into this same Python).\n\n"
+            f"{where}\n{detail}"
+        )
+    if "DLL" in str(err):
+        return (
+            "The speech library is installed but Windows can't load it – usually the "
+            "Microsoft Visual C++ Redistributable is missing.\n\n"
+            "Fix: double-click Setup.bat again (it installs that too), or run in a terminal:\n"
+            "winget install Microsoft.VCRedist.2015+.x64\n\n"
+            f"{where}\n{detail}"
+        )
+    return f"The speech library couldn't be loaded.\n\nFix: double-click Setup.bat again.\n\n{where}\n{detail}"
+
+
 def transcribe_words(ffmpeg, audio, total, on_progress, on_status):
     """Return [(token, start_seconds)] for every spoken word."""
     # The model download's newer "xet" transfer can stall on some connections;
@@ -167,8 +188,8 @@ def transcribe_words(ffmpeg, audio, total, on_progress, on_status):
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     try:
         from faster_whisper import WhisperModel
-    except ImportError:
-        raise RuntimeError("Narration matching needs the speech-recognition library.\n\nInstall it once by running this in a terminal:\n\npip install faster-whisper")
+    except ImportError as e:
+        raise RuntimeError(speech_import_help(e))
     on_status("Loading the speech model (the first time it downloads ~480 MB)…")
     model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     on_status("Listening to the narration…")

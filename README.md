@@ -512,7 +512,8 @@ Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
 | Problem | What to do |
 |---|---|
 | "FFmpeg is not installed" | Run `Setup.bat` |
-| "Narration matching needs the speech-recognition library" | Run `Setup.bat` |
+| "The speech library isn't installed for the Python that runs this tool" (even though you installed it) | The PC has more than one Python. `git pull` the latest version and run `Setup.bat` again – Setup and Make Video now use the same Python, and the message shows which one ran |
+| "The speech library is installed but Windows can't load it" / "DLL load failed" | Run `Setup.bat` again – it installs the Microsoft Visual C++ Redistributable. Or: `winget install Microsoft.VCRedist.2015+.x64` |
 | Model download very slow / stuck | Run `Setup.bat` again – it resumes. The tool uses plain HTTP downloads for reliability |
 | "No image for scene(s) …" | Retry those scenes in Flow Batch, or continue (previous image stays) |
 | "The script has N lines but there are M images…" | Only for images without scene numbers: make the counts equal, or name images `001_…` |
