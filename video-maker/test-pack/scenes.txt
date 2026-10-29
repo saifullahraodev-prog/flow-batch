@@ -1,7 +1,13 @@
-# Test scene file for Make Video - one line per scene: narration | image prompt
+# Scene file written by Flow Batch - one line per image: narration | image prompt
+## Leaving port
 Welcome aboard. Today we follow a small cargo ship across the ocean. | stickman captain waving from a small cargo ship in the harbour
 The crew loads hundreds of containers before sunrise. | stickman crew loading containers with a crane at dawn
+At six o'clock the captain sounds the horn, and the ship slowly leaves the harbour. | small cargo ship leaving the harbour, captain pulling the horn
+## The storm
 At noon the sea is calm, and the captain checks the map. | stickman captain looking at a map on the bridge, calm sea
 Suddenly, dark clouds appear on the horizon. | dark storm clouds over the sea, small ship in the distance
 The waves grow taller, but the ship holds steady. | small cargo ship riding huge waves in a storm
-By evening the storm has passed, and the lights of the port are in sight. | ship approaching a port with lights at sunset
+## Safe arrival
+By evening the storm has passed. | calm sea at sunset after a storm, small ship
+The crew cheers as the lights of the port come into sight. | stickman crew cheering on deck, port lights in the distance
+Another voyage is complete. Thanks for watching! | ship docked in the port at night, captain waving goodbye

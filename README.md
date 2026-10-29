@@ -390,14 +390,39 @@ extension. If the page reloads or Chrome restarts, the panel comes back and
 ```
 <your save folder>\
 └── titanic_2026-10-26_1530\          ← one folder per run: <file name>_<date>_<time>
-    ├── scenes.txt                     ← narration | prompt per scene (for Make Video)
+    ├── scenes.txt                     ← written automatically at Start (for Make Video)
     ├── 001_stickman-sailors-waving-from-a-huge_1.png
     ├── 001_stickman-sailors-waving-from-a-huge_2.png
     ├── 002_stickman-captain-smiling-on-the-deck_1.png
     ├── …
     ├── titanic_2026-10-26_1530.mp4            ← made by Make Video
+    ├── titanic_2026-10-26_1530.srt            ← made by Make Video (subtitles)
+    ├── titanic_2026-10-26_1530_youtube.txt    ← made by Make Video (chapters)
     └── titanic_2026-10-26_1530_timings.csv    ← made by Make Video
 ```
+
+### `scenes.txt` – nothing for you to do
+
+When you press **Start**, Flow Batch writes `scenes.txt` into the run folder by
+itself (the log says *"Saved scenes.txt (narration for Make Video) in the run
+folder"*). It holds the narration, picture prompt and chapters of every scene:
+
+```
+# Scene file written by Flow Batch - one line per image: narration | image prompt
+## Leaving port
+Welcome aboard. Today we follow a small cargo ship across the ocean. | stickman captain waving from a small cargo ship
+```
+
+- Make Video reads it automatically to time the pictures to your narration,
+  write the subtitles and the chapter list. Nothing of it is sent to Flow
+  except the picture prompts.
+- It is only written when your scenes have narration (Scene Builder, or a
+  scene file with `narration | picture` lines) and saving is on.
+- Don't rename or delete it. If it's ever missing: in Scene Builder click
+  **Save .txt**, copy the file into the run folder and rename it `scenes.txt`
+  (or pick it in Make Video's **Script** box).
+
+### Other notes
 
 - Image names: `<scene number>_<first words of the prompt>_<image number>.<ext>`.
 - Identical images reached through two addresses are saved only once.
@@ -423,7 +448,13 @@ extension. If the page reloads or Chrome restarts, the panel comes back and
 
 ### How the timing is decided
 
-- **With a script / scenes.txt** – the narration is transcribed on your PC
+There is **no duration to type**: each picture stays on screen **as long as
+its narration is being spoken**. A sentence spoken for 4 s gives its picture
+~4 s; a long one, longer. You control the pace by how you cut the scenes in
+Scene Builder (shorter scenes = pictures change more often; **↑ Merge** /
+**✂ Split**; a new paragraph always starts a new picture).
+
+- **With scenes.txt (or a script)** – the narration is transcribed on your PC
   (Whisper `small` model, nothing is uploaded). The script's words are matched
   to the spoken words, and each image starts **0.15 s before its line's first
   word**. Each image is shown at least 0.5 s. A matching score is shown
@@ -445,23 +476,29 @@ Images are paired by the **number at the start of their file name**
 
 ### Try it with the test pack
 
-`video-maker/test-pack/` is a ready-made example: 6 images (each shows
-**SCENE n** and its narration line), a 33-second spoken `narration.mp3`, and a
-`scenes.txt` – exactly what a Flow Batch run leaves behind.
+[`video-maker/test-pack/`](video-maker/test-pack/) is a complete example –
+exactly what a Flow Batch run leaves behind, plus extras to practise with:
 
-1. Copy the `test-pack` folder somewhere (e.g. the Desktop), so the test video
-   isn't created inside the repository.
-2. **Make Video.bat** → *Images folder*: the copy, *Narration audio*: its
-   `narration.mp3`, *Script*: leave empty.
-3. The summary should say *"6 scenes (from scenes.txt in the folder), 6 image(s).
-   ✓ Every scene has an image."* → **Make video**.
-4. Play the video: each "SCENE n" card should appear just as its sentence
-   starts. Expected starts: 0:00, 0:07.3, 0:12.1, 0:17.2, 0:22.2, 0:26.9
-   (also listed in the `_timings.csv`).
+| File | What it is |
+|---|---|
+| `001_…png` … `009_…png` | 9 scene images; each shows **SCENE n** and its sentence |
+| `scenes.txt` | The scene file, with 3 `## chapters` (Leaving port, The storm, Safe arrival) |
+| `narration.mp3` | 47 s of narration reading the 9 scenes |
+| `music.mp3` | A soft music loop for the background-music option |
+| `script.txt` | The same narration as a plain script, for practising Scene Builder |
 
-To test a missing scene, delete `003_…png` from your copy before step 2: the
-tool reports *"No image for scene(s) 3"*, and if you continue, SCENE 2 stays
-on screen until scene 4 starts.
+**Quick test:** copy `test-pack` to your Desktop → **Make Video.bat** →
+*Images folder*: the copy, *Narration*: its `narration.mp3`, *Script*: empty,
+optionally *Music*: `music.mp3` + *Slow zoom* → **Make video**. The summary
+should say *"9 scenes … 3 chapter title(s). ✓ Every scene has an image."*
+
+You should get the video (cards appearing at about 0:00, 0:07, 0:12, 0:18,
+0:24, 0:28, 0:34, 0:37, 0:42), subtitles, and a chapter list
+`0:00 Leaving port · 0:18 The storm · 0:33 Safe arrival`.
+
+Full step-by-step exercises – including a missing-image test and a Scene
+Builder practice with `script.txt` – are in the
+[test pack's README](video-maker/test-pack/README.md).
 
 ### Output
 
@@ -635,9 +672,24 @@ Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
 
 ## FAQ
 
-**Do I have to use a scene file?**
-No. A plain prompt file (one prompt per line) works for images. For a video
-you then either pick a separate script in Make Video, or get equal timing.
+**Do I have to write a scene file?**
+No. Paste your plain script into **Scene Builder** – it makes the scenes for
+you. (A plain list of image prompts also works for images only; a video from
+it then needs a separate script in Make Video, or uses equal timing.)
+
+**Do I have to create `scenes.txt` or add anything in Flow for it?**
+No. Flow Batch writes `scenes.txt` into the run folder by itself when you
+press Start, and Make Video reads it by itself. Only the picture prompts are
+ever sent to Flow.
+
+**How do I set how long each image is shown?**
+You don't – each image stays as long as its sentence is being spoken. Make
+scenes shorter or longer in Scene Builder to change how often pictures change.
+Just record the narration exactly as written.
+
+**Do I need to pick a script in Make Video?**
+Not with folders from Flow Batch (they contain `scenes.txt`). Only for your
+own image folders without one.
 
 **Can I use my own images in the video?**
 Yes. Name them `001_….png`, `002_….png`… to match scene numbers, or provide a
