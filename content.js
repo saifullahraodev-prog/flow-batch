@@ -75,6 +75,27 @@
     return parts.map((s) => s.trim()).filter(Boolean);
   }
 
+  // Scenes from the loaded file. A "## Chapter title" line names the chapter that
+  // starts at the next scene (kept in scenes.txt for Make Video's YouTube chapters).
+  function parseScenes(text, mode) {
+    if (mode === 'blank') return parsePrompts(text, mode).map((line) => ({ ...splitScene(line), chapter: '' }));
+    const scenes = [];
+    let chapter = '';
+    for (const raw of text.replace(/\r\n?/g, '\n').replace(/^﻿/, '').split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      const m = line.match(/^##\s*(.+)$/);
+      if (m) {
+        chapter = m[1].trim();
+        continue;
+      }
+      if (line.startsWith('#')) continue;
+      scenes.push({ ...splitScene(line), chapter });
+      chapter = '';
+    }
+    return scenes;
+  }
+
   // Scene file lines are "narration | image prompt"; plain lines are just a prompt.
   function splitScene(line) {
     const bar = line.indexOf('|');
@@ -819,10 +840,11 @@
   // Save scenes.txt next to the images: Make Video reads the narration from it.
   async function saveSceneFile() {
     if (!state.prompts.some((p) => p.narration)) return;
-    const lines = [
-      '# Scene file written by Flow Batch - one line per image: narration | image prompt',
-      ...state.prompts.map((p) => `${p.narration || ''} | ${p.text}`)
-    ];
+    const lines = ['# Scene file written by Flow Batch - one line per image: narration | image prompt'];
+    for (const p of state.prompts) {
+      if (p.chapter) lines.push(`## ${p.chapter}`);
+      lines.push(`${p.narration || ''} | ${p.text}`);
+    }
     try {
       await writeToRun('scenes.txt', new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/plain' }));
       log('Saved scenes.txt (narration for Make Video) in the run folder');
@@ -1125,8 +1147,8 @@
   let rawFileText = '';
 
   function loadPrompts() {
-    state.prompts = parsePrompts(rawFileText, state.settings.splitMode).map((line) => ({
-      ...splitScene(line),
+    state.prompts = parseScenes(rawFileText, state.settings.splitMode).map((scene) => ({
+      ...scene,
       status: 'pending',
       images: 0
     }));

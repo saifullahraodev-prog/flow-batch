@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.3.0** (shown in the panel title).
+Current version: **1.4.0** (shown in the panel title).
 
 ---
 
@@ -59,6 +59,7 @@ Current version: **1.3.0** (shown in the panel title).
 | `video-maker/Setup.bat` | One-time installer for everything Make Video needs |
 | `video-maker/make_video.py` | The Make Video tool (Python + FFmpeg + Whisper) |
 | `video-maker/requirements.txt` | Python package list for Make Video |
+| `SCENE-WRITER-PROMPT.md` | Ready-to-paste prompt: Claude/ChatGPT turns your script into a scene file |
 | `PROMPT.md` | A ready-made prompt for continuing development with an AI assistant |
 
 ---
@@ -122,7 +123,9 @@ nothing extra unless the release notes say so (then run `Setup.bat` again).
 
 ## Quick start
 
-1. Write a scene file: `narration | image prompt` on each line.
+1. Write a scene file: `narration | image prompt` on each line – or let
+   Claude/ChatGPT write it from your script with
+   [`SCENE-WRITER-PROMPT.md`](SCENE-WRITER-PROMPT.md).
 2. In Flow: open a project, choose model and image count.
 3. In the Flow Batch panel: **Load .txt file…**, type a **Style**, (optional)
    **Reference images…**, **Start**.
@@ -175,6 +178,16 @@ What each line becomes:
    one scene per line, then add `| prompt` at the end of each line.)
 3. **File → Save as**, choose a name like `titanic.txt`, and keep
    *Encoding: UTF-8*. The run folder and the video will be named after it.
+
+**Faster: let an AI write it.** Open
+[`SCENE-WRITER-PROMPT.md`](SCENE-WRITER-PROMPT.md), copy the prompt into
+Claude or ChatGPT, paste your script at the end, and you get the finished
+scene file back – narration kept word for word, an image prompt for every
+scene, and chapter titles.
+
+**Chapters (optional):** a line `## Chapter title` before a scene starts a
+YouTube chapter there – Make Video puts the chapter list in the video's
+description file (Step 8).
 
 A ready example is in [`sample-scenes.txt`](sample-scenes.txt). All rules are
 in [Scene file format](#scene-file-format).
@@ -239,16 +252,28 @@ in order**, as **one** audio file (`.mp3`, `.wav`, `.m4a`…).
 3. **Narration audio** → your recording.
 4. Leave **Script** empty – the folder's `scenes.txt` is used automatically.
    Check the summary says **"✓ Every scene has an image"**.
-5. Click **Make video**.
+5. *(Optional)* **Background music** → a music file, and its volume
+   (Quiet / Medium / Loud). It loops if shorter than the video, fades out at
+   the end, and automatically gets quieter while the narrator speaks.
+6. *(Optional)* tick **Slow zoom on images** – each picture slowly zooms in or
+   out (alternating), which keeps still images feeling alive.
+7. Click **Make video**.
 
-The tool first listens to the narration (progress bar 0–50 %), then builds the
+The tool first listens to the narration (progress bar 0–45 %), then builds the
 video. When it's done it offers to open the folder.
 
 ### Step 8 – Check and upload
 
-Watch the video. If a picture changes at the wrong moment, the
-`…_timings.csv` file shows each scene's start time and narration line. Then
-upload the `.mp4` to YouTube.
+Next to the video you'll find:
+
+| File | Use on YouTube |
+|---|---|
+| `….mp4` | The video to upload |
+| `….srt` | **Subtitles** – in YouTube Studio: *Subtitles → Add language → Upload file → With timing*. Spelled exactly like your script |
+| `…_youtube.txt` | **Description with chapters** – copy the chapter list into the video's description; YouTube turns it into clickable chapters |
+| `…_timings.csv` | For you: when each picture starts (to check timing) |
+
+Watch the video once, then upload.
 
 ---
 
@@ -264,7 +289,8 @@ Narration for scene 2. | image prompt for scene 2
 |---|---|
 | One line = one scene = one picture | Line 1 → images `001_…`, line 2 → `002_…`, … |
 | Separator | The **first** `\|` on the line splits narration (left) from prompt (right) |
-| Comments | Lines starting with `#` and empty lines are ignored |
+| Chapters | A line `## Chapter title` starts a chapter at the next scene. Used for the YouTube description; Flow Batch keeps these lines in `scenes.txt` |
+| Comments | Other lines starting with `#`, and empty lines, are ignored |
 | Encoding | Save as UTF-8 (Notepad's default) |
 | Plain prompt files | Lines **without** `\|` are treated as prompts only (no narration). Make Video then needs a separate script, or uses equal timing |
 | Long prompts | Choose *"Separated by blank line"* in the panel to allow prompts over several lines (plain prompt files only) |
@@ -355,8 +381,10 @@ extension. If the page reloads or Chrome restarts, the panel comes back and
 | 2. Narration audio | One audio file for the whole video: mp3, wav, m4a, aac, ogg, flac |
 | 3. Script (optional) | Only needed if the folder has no `scenes.txt`. A `.txt` with one narration line per scene (scene-file lines are fine too) |
 | Only the first image of each prompt | On: one image per scene (`_1`, or `_2` if `_1` was deleted). Off: all images of a scene share its time |
-| Border colour | White or black bars around images that are not 16:9 |
-| Summary line | Number of scenes and images, ✓ if every scene has an image, or which scenes are missing |
+| Background music (optional) | A music file and its volume (Quiet / Medium / Loud). Loops, fades out over the last 3 s, and dips about 8 dB whenever the narrator speaks. **✕** clears it |
+| Slow zoom on images | Each image slowly zooms in or out by 8 % (alternating). Takes longer to build |
+| Border | White or black bars around images that are not 16:9 |
+| Summary line | Number of scenes, chapter titles and images, ✓ if every scene has an image, or which scenes are missing |
 
 ### How the timing is decided
 
@@ -404,6 +432,17 @@ on screen until scene 4 starts.
 
 - `<folder name>.mp4` – 1920×1080, 30 fps, H.264 video, AAC 192 kbps audio,
   same length as the narration, ready for YouTube.
+- `<folder name>.srt` – subtitles *(only with a script / scenes.txt)*. The
+  words come from your script (so names are spelled right), timed from the
+  narration: one sentence per subtitle when it fits (~42 characters, ≤ 5 s),
+  longer sentences split into even parts, preferably at commas.
+- `<folder name>_youtube.txt` – description text with the chapter list
+  *(only with a script / scenes.txt)*:
+  - with `## Chapter title` lines in the scene file → those chapters
+    (an "Intro" is added at 0:00 if the first title starts later);
+  - without → about one chapter per minute, titled from the narration;
+  - YouTube's rules are applied: first chapter at 0:00, at least 3 chapters,
+    each at least 10 s. A video too short for that gets no chapter list.
 - `<folder name>_timings.csv` – opens in Excel:
 
 | Column | Meaning |
@@ -412,12 +451,14 @@ on screen until scene 4 starts.
 | image | Image file(s) used, or *(no image – previous one stays)* |
 | starts_at | Start time in the video (m:ss.ss) |
 | seconds | How long the scene is on screen |
+| chapter | Chapter title starting at this scene (if any) |
 | narration | The narration line for that scene |
 
 ### Speed
 
 A 30-second video takes about a minute; a 10-minute video a few minutes
-(most of the time is spent listening to the narration).
+(most of the time is spent listening to the narration). **Slow zoom** adds
+time, since every frame is drawn separately.
 
 ---
 
@@ -461,8 +502,15 @@ ends.
    line's first matched word as its start; lines with no recognised words are
    placed between their neighbours.
 4. **Prepare** – scale/pad every image to exactly 1920×1080.
-5. **Encode** – FFmpeg concat with each image's duration + the narration →
-   MP4; write the timings CSV.
+5. **Subtitles & chapters** – script words get the spoken times (missed words
+   interpolated) → `.srt`; chapter starts from `##` lines or one per minute →
+   `_youtube.txt`.
+6. **Picture track** – still images joined with their durations, or (slow zoom)
+   one zoompan clip per image with frame counts from the running total so cuts
+   stay exact, then joined.
+7. **Sound** – the narration; with music, the music is looped, faded out and
+   ducked under the voice (`sidechaincompress`), then mixed. A mono voice is
+   copied to both channels at full level.
 
 ---
 
@@ -503,11 +551,16 @@ ends.
 | `read_script()`, `find_script()`, `plan_scenes()` | Read narration, auto-find `scenes.txt`, pair images with scenes, report missing/extra |
 | `load_audio_16k()`, `transcribe_words()` | Decode audio with FFmpeg; Whisper word timestamps |
 | `scene_starts()` | Align script lines to spoken words → start time per scene |
-| `build_video()` | Shots, timings CSV, image fitting, FFmpeg encode |
+| `parse_scene_file()` | Narration lines and `## chapter` titles from a scene file |
+| `align()`, `scene_starts()` | Match script words to spoken words → start time per scene |
+| `word_timeline()`, `subtitle_cues()`, `srt_time()` | Script words with spoken times → `.srt` subtitles |
+| `make_chapters()`, `write_youtube_text()` | YouTube chapter list (rules applied) → `_youtube.txt` |
+| `build_video()` | Shots, timings CSV, image fitting, picture track (still or slow zoom), sound (narration + ducked music) |
 | `App` | The Tkinter window |
 
 Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
-`WHISPER_MODEL`, `LEAD_IN`, `MIN_SCENE`.
+`WHISPER_MODEL`, `LEAD_IN`, `MIN_SCENE`, `ZOOM`, `MUSIC_LEVELS`,
+`SUB_MAX_CHARS`, `SUB_MAX_SECONDS`, `CHAPTER_MIN`.
 
 ---
 
@@ -579,7 +632,7 @@ yourself. Retries generate again.
   shows warnings.
 - Flow changes its page from time to time. If something stops working after a
   Flow update, the log and **Test detection** show what is no longer found.
-- Make Video shows still images with hard cuts (no zoom or transitions).
+- Make Video uses hard cuts between images (no crossfades).
 
 ---
 
