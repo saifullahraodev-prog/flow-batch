@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.4.0** (shown in the panel title).
+Current version: **1.5.0** (shown in the panel title).
 
 ---
 
@@ -123,25 +123,68 @@ nothing extra unless the release notes say so (then run `Setup.bat` again).
 
 ## Quick start
 
-1. Write a scene file: `narration | image prompt` on each line – or let
-   Claude/ChatGPT write it from your script with
-   [`SCENE-WRITER-PROMPT.md`](SCENE-WRITER-PROMPT.md).
-2. In Flow: open a project, choose model and image count.
-3. In the Flow Batch panel: **Load .txt file…**, type a **Style**, (optional)
-   **Reference images…**, **Start**.
-4. Record the narration (the left-hand sides, in order) as one audio file.
+1. In Flow: open a project, choose model and image count.
+2. In the Flow Batch panel: **Scene Builder…** → paste your script →
+   **Split into scenes** → (optionally type a picture for some scenes) →
+   **Use these scenes**.
+3. Type a **Style**, (optional) **Reference images…**, **Start**.
+4. Record your script as one audio file.
 5. **Make Video.bat** → pick the run folder + the audio → **Make video**.
 
 ---
 
 ## The full workflow, step by step
 
-### Step 1 – Write the scene file
+### Step 1 – Turn your script into scenes
 
 **The idea:** your video is a series of *scenes*. In each scene, the narrator
-says a sentence (or a few) while one picture is on screen. The scene file is
-simply a list of those scenes – **one line per scene** – and each line says two
-things, separated by a `|` (the vertical bar, `Shift` + `\` on most keyboards):
+says a sentence (or a few) while one picture is on screen. Flow Batch needs to
+know, for every scene, **what is said** and **what picture to show**.
+
+#### The easy way: Scene Builder (recommended)
+
+You only need your script – plain text, exactly as you will read it.
+
+1. Open Flow; in the Flow Batch panel click **Scene Builder…**. A large editor
+   opens over the page.
+2. **Paste your script** into the top box. (Optional: put a line
+   `## Chapter title` where a YouTube chapter should start.)
+3. Pick a **Scene length** – *Short* (about 1 sentence, ~5 s per picture),
+   *Medium* (~2 sentences), *Long* (~3 sentences), or *Each line I wrote = one
+   scene* if you already split it yourself – and type a **Video name**.
+4. Click **Split into scenes**. You get a table:
+
+   | # | Narration – what is said | Picture – optional |
+   |---|---|---|
+   | 1 | In 1912 the Titanic left Southampton on her first voyage. | *(empty – grey: the sentence is used)* |
+   | 2 | She was the largest ship ever built, and Captain Smith was proud of her. | stickman captain with a white cap standing proudly on the deck |
+
+   - The **Picture** box is optional. Left empty, the narration sentence itself
+     (plus your Style) is sent to Flow – it is shown in grey so you can see it.
+     Type a description only where you want a specific picture.
+   - **↑ Merge** joins a scene onto the one above, **✂ Split** cuts a scene in
+     two at a natural place (between sentences or at a comma), **Delete**
+     removes it, **+ Add scene** adds one at the end. You can also edit any
+     text directly, and add chapter titles per scene.
+   - Paragraphs (blank lines) in your script always start a new scene.
+5. Click **Use these scenes** – they appear in the panel list, ready to Start.
+   **Save .txt** keeps a copy as a scene file you can load again later.
+
+Your script and the table are kept automatically – closing the editor or
+reloading the page loses nothing.
+
+#### Other ways
+
+- **Let an AI write the pictures:** [`SCENE-WRITER-PROMPT.md`](SCENE-WRITER-PROMPT.md)
+  is a prompt for Claude/ChatGPT that turns your script into a complete scene
+  file with a tailored picture for every scene. Save the answer as a `.txt`
+  and load it with **Load .txt file…**.
+- **Write the scene file yourself**, as described below.
+
+#### The scene file (what Scene Builder makes for you)
+
+A scene file is a plain `.txt` with **one line per scene**; each line says the
+two things, separated by a `|` (the vertical bar, `Shift` + `\`):
 
 ```
 what the narrator says   |   what the picture shows
@@ -171,19 +214,9 @@ What each line becomes:
 - Start a new line wherever the picture should change. A scene can be one
   short sentence or several sentences – as long as they stay on one line.
 
-**How to create it:**
-
-1. Open **Notepad**.
-2. Type your scenes, one per line, as above. (Tip: write the narration first,
-   one scene per line, then add `| prompt` at the end of each line.)
-3. **File → Save as**, choose a name like `titanic.txt`, and keep
-   *Encoding: UTF-8*. The run folder and the video will be named after it.
-
-**Faster: let an AI write it.** Open
-[`SCENE-WRITER-PROMPT.md`](SCENE-WRITER-PROMPT.md), copy the prompt into
-Claude or ChatGPT, paste your script at the end, and you get the finished
-scene file back – narration kept word for word, an image prompt for every
-scene, and chapter titles.
+**To write one by hand:** open **Notepad**, type one scene per line as above,
+then **File → Save as** `titanic.txt` (*Encoding: UTF-8*), and load it with
+**Load .txt file…**. The run folder and the video are named after it.
 
 **Chapters (optional):** a line `## Chapter title` before a scene starts a
 YouTube chapter there – Make Video puts the chapter list in the video's
@@ -206,7 +239,8 @@ Flow Batch uses whatever is selected in Flow; it reads the `xN` count itself.
 
 In the panel (bottom-right of the Flow page):
 
-1. **Load .txt file…** → choose your scene file. The list shows every scene.
+1. Your scenes from Step 1 are already in the list (or use **Load .txt file…**
+   for a scene file).
 2. **Style box** → type the look shared by all images, e.g.
    `2D stickman cartoon, flat colours, white background`.
 3. *(Optional)* **Reference images…** → pick 1 or 2 images (a character, a
@@ -306,6 +340,7 @@ in the panel list to see its narration and full prompt.
 
 | Control | What it does |
 |---|---|
+| **Scene Builder…** | Opens the editor: paste a plain script → split into scenes → optional pictures, chapters, merge/split/delete → **Use these scenes** / **Save .txt**. Work is kept automatically |
 | **Load .txt file…** | Loads a scene file or prompt file. Loading a new file starts a new run folder |
 | *One prompt per line / Separated by blank line* | How the file is split |
 | **Style box** | Text added in front of every prompt |
@@ -521,7 +556,8 @@ ends.
 | Area | Main functions |
 |---|---|
 | State & storage | `DEFAULTS`, `state`, `save()`, `load()` – settings and progress in `chrome.storage.local` |
-| Scene file | `parsePrompts()`, `splitScene()` (narration \| prompt), `fullPrompt()` (adds the style) |
+| Scene file | `parseScenes()` (scenes + `##` chapters), `splitScene()` (narration \| prompt), `fullPrompt()` (adds the style) |
+| Scene Builder | `splitScript()` (script → scenes by sentences, paragraphs, chosen length), `sentencesOf()`, `splitLong()`, `splitInTwo()`, `rowsToSceneFile()`, `renderBuilder()` and the `sb…` handlers |
 | Finding Flow's UI | `findPromptBox()`, `findGenerateButton()`, `findComposer()`, `findComposerCard()` |
 | Typing & submitting | `setText()` (insertText, works with Flow's ProseMirror editor), `submitPrompt()`, `waitSubmitted()`, `watchPage()` |
 | Real input | `trusted()`, `trustedClickOn()` – ask `background.js` for real clicks/keys |

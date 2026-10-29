@@ -22,6 +22,8 @@
     refs: [],              // reference images { name, dataUrl } – max 2, attached for every prompt
     runFolder: '',         // sub-folder for this run inside the chosen save folder
     refMethod: null,       // attach method that worked last time (tried first next time)
+    // Scene Builder: plain script → scenes table (narration, picture, chapter)
+    builder: { script: '', mode: 'medium', name: 'my-video', rows: [] },
     settings: { ...DEFAULTS },
     running: false,
     paused: false,
@@ -46,7 +48,8 @@
         fileName: state.fileName,
         settings: state.settings,
         refs: state.refs,
-        runFolder: state.runFolder
+        runFolder: state.runFolder,
+        builder: state.builder
       }
     });
   }
@@ -58,6 +61,7 @@
     state.fileName = data.fileName || '';
     state.refs = data.refs || [];
     state.runFolder = data.runFolder || '';
+    if (data.builder) state.builder = { ...state.builder, ...data.builder };
     state.prompts = (data.prompts || []).map((p) => ({
       ...p,
       status: p.status === 'running' ? 'pending' : p.status
@@ -94,6 +98,109 @@
       chapter = '';
     }
     return scenes;
+  }
+
+  // ---------- Scene Builder: plain script → scenes ----------
+
+  const SCENE_WORDS = { short: 12, medium: 22, long: 35 }; // target words per scene (~2.5 words/s)
+  const ABBREV = /\b(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|vs|etc|Capt|Lt|Col|Gen|Mt|No|Fig|approx|e\.g|i\.e|U\.S|U\.K)\.$/i;
+  const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+
+  function sentencesOf(paragraph) {
+    const out = [];
+    for (const piece of paragraph.split(/(?<=[.!?…]["'”’)\]]*)\s+/)) {
+      const s = piece.trim();
+      if (!s) continue;
+      // "Mr. Smith", "11 p.m. the lookout…": not a new sentence.
+      if (out.length && (ABBREV.test(out[out.length - 1]) || /^[a-z]/.test(s))) out[out.length - 1] += ` ${s}`;
+      else out.push(s);
+    }
+    return out;
+  }
+
+  // A scene far longer than the target is cut at a comma / "and" / "but"… near its middle.
+  function splitLong(text, target) {
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length <= target * 1.8) return [text];
+    const mid = words.length / 2;
+    let best = -1;
+    words.forEach((w, i) => {
+      if (i < 3 || i > words.length - 3) return;
+      const cut = /[,;:]$/.test(w) ? i + 1 : /^(and|but|so|because|while|when|which|then)$/i.test(w) ? i : -1;
+      if (cut > 0 && (best < 0 || Math.abs(cut - mid) < Math.abs(best - mid))) best = cut;
+    });
+    if (best < 0) best = Math.round(mid);
+    return [...splitLong(words.slice(0, best).join(' '), target), ...splitLong(words.slice(best).join(' '), target)];
+  }
+
+  // Script text → [{ narration, prompt: '', chapter }]. "## Title" lines become chapters.
+  // Blank lines (paragraphs) always end a scene; mode 'lines' = every line is one scene.
+  function splitScript(text, mode) {
+    const rows = [];
+    let chapter = '';
+    const blocks = [];
+    let para = [];
+    const endPara = () => {
+      if (para.length) blocks.push({ text: para.join(' '), chapter });
+      para = [];
+    };
+    for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
+      const line = raw.trim();
+      const m = line.match(/^##\s*(.+)$/);
+      if (m) {
+        endPara();
+        chapter = m[1].trim();
+        continue;
+      }
+      if (!line || mode === 'lines') {
+        if (line) para.push(line);
+        endPara();
+        continue;
+      }
+      para.push(line);
+    }
+    endPara();
+
+    const target = SCENE_WORDS[mode] || SCENE_WORDS.medium;
+    let pendingChapter = '';
+    for (const block of blocks) {
+      if (block.chapter && block.chapter !== pendingChapter) pendingChapter = block.chapter;
+      let scenes;
+      if (mode === 'lines') {
+        scenes = [block.text];
+      } else {
+        scenes = [];
+        let cur = [];
+        let words = 0;
+        for (const s of sentencesOf(block.text)) {
+          const n = wordCount(s);
+          if (cur.length && words + n > target * 1.3 && words >= target * 0.5) {
+            scenes.push(cur.join(' '));
+            cur = [];
+            words = 0;
+          }
+          cur.push(s);
+          words += n;
+        }
+        if (cur.length) scenes.push(cur.join(' '));
+        scenes = scenes.flatMap((sc) => splitLong(sc, target));
+      }
+      for (const narration of scenes) {
+        const used = rows.some((r) => r.chapter === pendingChapter);
+        rows.push({ narration: narration.replace(/\|/g, '/'), prompt: '', chapter: pendingChapter && !used ? pendingChapter : '' });
+      }
+    }
+    return rows;
+  }
+
+  // Scene Builder rows → the scene-file text (narration | picture, ## chapters).
+  function rowsToSceneFile(rows) {
+    const lines = ['# Scene file made with Flow Batch Scene Builder - narration | image prompt'];
+    for (const r of rows) {
+      if (r.chapter && r.chapter.trim()) lines.push(`## ${r.chapter.trim()}`);
+      lines.push(`${r.narration.trim().replace(/\|/g, '/')} | ${(r.prompt.trim() || r.narration.trim()).replace(/\|/g, '/')}`);
+    }
+    return lines.join('\r\n') + '\r\n';
   }
 
   // Scene file lines are "narration | image prompt"; plain lines are just a prompt.
@@ -988,6 +1095,40 @@
       .ref img { width: 100%; height: 100%; object-fit: cover; display: block; }
       .ref button { position: absolute; top: 2px; right: 2px; padding: 0 5px; font-size: 12px;
         line-height: 16px; border-radius: 8px; background: rgba(0,0,0,.7); }
+
+      /* ---- Scene Builder ---- */
+      .sb-back { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 2147483647;
+        display: flex; align-items: center; justify-content: center;
+        font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; color: #e8eaed; }
+      .sb-back[hidden] { display: none; }
+      .sb { width: min(1100px, calc(100vw - 32px)); height: calc(100vh - 48px); background: #202124;
+        border: 1px solid #3c4043; border-radius: 12px; display: flex; flex-direction: column;
+        box-shadow: 0 12px 40px rgba(0,0,0,.6); overflow: hidden; }
+      .sb-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; background: #292a2d; }
+      .sb-head b { font-size: 15px; flex: 1; }
+      .sb-top { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 12px 16px;
+        border-bottom: 1px solid #3c4043; }
+      .sb-top textarea { width: 100%; height: 110px; resize: vertical; box-sizing: border-box; font: inherit;
+        color: #e8eaed; background: #303134; border: 1px solid #5f6368; border-radius: 8px; padding: 8px; }
+      .sb-side { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
+      .sb-side select, .sb-side input { width: 100%; }
+      .sb-help { color: #9aa0a6; font-size: 12px; padding: 6px 16px; }
+      .sb-rows { flex: 1; overflow: auto; padding: 0 16px 8px; }
+      .sb-row { display: grid; grid-template-columns: 34px 1fr 1fr 64px; gap: 8px; align-items: start;
+        padding: 8px 0; border-bottom: 1px solid #303134; }
+      .sb-row.head { position: sticky; top: 0; background: #202124; z-index: 1; color: #9aa0a6;
+        font-size: 12px; padding: 8px 0 6px; }
+      .sb-num { color: #9aa0a6; padding-top: 6px; text-align: right; }
+      .sb-row textarea { width: 100%; box-sizing: border-box; min-height: 52px; resize: vertical; font: inherit;
+        color: #e8eaed; background: #303134; border: 1px solid #5f6368; border-radius: 6px; padding: 6px; }
+      .sb-row textarea::placeholder { color: #8f949a; font-style: italic; }
+      .sb-row input.sb-ch { width: 100%; box-sizing: border-box; margin-bottom: 4px; font-size: 12px; }
+      .sb-acts { display: flex; flex-direction: column; gap: 4px; }
+      .sb-acts button { padding: 3px 6px; font-size: 12px; }
+      .sb-foot { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #292a2d;
+        border-top: 1px solid #3c4043; }
+      .sb-foot .muted { flex: 1; }
+      .sb-empty { color: #9aa0a6; text-align: center; padding: 40px 0; }
     </style>
     <div class="panel">
       <div class="head">
@@ -997,6 +1138,7 @@
       </div>
       <div class="body">
         <div class="row">
+          <button id="build" class="primary" title="Paste a plain script – it is split into scenes for you">Scene Builder…</button>
           <button id="pick">Load .txt file…</button>
           <select id="splitMode" style="width:auto">
             <option value="line">One prompt per line</option>
@@ -1049,6 +1191,41 @@
           </div>
         </details>
         <div class="log" id="log"></div>
+      </div>
+    </div>
+    <div class="sb-back" id="sb" hidden>
+      <div class="sb">
+        <div class="sb-head">
+          <b>Scene Builder</b>
+          <button class="icon" id="sbClose" title="Close (your work is kept)">×</button>
+        </div>
+        <div class="sb-top">
+          <textarea id="sbScript" placeholder="Paste your narration script here – just the words you will say, as normal text.
+
+Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
+          <div class="sb-side">
+            <span class="muted">Scene length</span>
+            <select id="sbMode">
+              <option value="short">Short – about 1 sentence (~5 s)</option>
+              <option value="medium">Medium – about 2 sentences (~9 s)</option>
+              <option value="long">Long – about 3 sentences (~14 s)</option>
+              <option value="lines">Each line I wrote = one scene</option>
+            </select>
+            <button class="primary" id="sbSplit">Split into scenes ↓</button>
+            <span class="muted">Video name</span>
+            <input type="text" id="sbName" placeholder="my-video">
+          </div>
+        </div>
+        <div class="sb-help">Each scene shows one picture while its narration is spoken. The <b>picture</b> box is
+          optional: left empty, the narration itself (plus your Style) is sent to Flow – type only where you want a
+          specific picture. Edit, merge or delete scenes freely.</div>
+        <div class="sb-rows" id="sbRows"></div>
+        <div class="sb-foot">
+          <span class="muted" id="sbInfo"></span>
+          <button id="sbAdd">+ Add scene</button>
+          <button id="sbSave" title="Save the scene file (.txt) to keep or edit later">Save .txt</button>
+          <button class="primary" id="sbUse">Use these scenes</button>
+        </div>
       </div>
     </div>`;
 
@@ -1110,6 +1287,7 @@
     $('stop').disabled = !state.running;
     $('reset').disabled = state.running || !total;
     $('pick').disabled = state.running;
+    $('build').disabled = state.running;
     $('splitMode').value = state.settings.splitMode;
     $('refPick').disabled = state.running || state.refs.length >= 2;
     $('folderPick').disabled = state.running;
@@ -1159,6 +1337,265 @@
     log(`Loaded ${state.prompts.length} prompts` + (scenes ? ` (scene file: ${scenes} with narration)` : ''));
     const empty = state.prompts.findIndex((p) => !p.text);
     if (empty >= 0) log(`⚠ Line ${empty + 1} has narration but no image prompt after "|"`);
+    if (!scenes && state.prompts.some((p) => wordCount(p.text) > 30)) {
+      log('Tip: this looks like a plain script. Use Scene Builder… to split it into scenes with narration.');
+    }
+  }
+
+  // ---------- Scene Builder window ----------
+
+  const builder = () => state.builder;
+  const safeName = () => (builder().name || 'my-video').trim().replace(/[\\/:*?"<>|]/g, '_') || 'my-video';
+  let saveTimer = 0;
+  const saveSoon = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(save, 500);
+  };
+
+  // Cut one scene in two: at the sentence nearest the middle, else at a comma/"and"/"but".
+  function splitInTwo(text) {
+    const sentences = sentencesOf(text);
+    const total = wordCount(text);
+    if (sentences.length > 1) {
+      let best = 1;
+      let acc = 0;
+      sentences.forEach((s, i) => {
+        acc += wordCount(s);
+        if (i < sentences.length - 1 && Math.abs(acc - total / 2) < Math.abs(wordCount(sentences.slice(0, best).join(' ')) - total / 2)) best = i + 1;
+      });
+      return [sentences.slice(0, best).join(' '), sentences.slice(best).join(' ')];
+    }
+    // One sentence: cut at a comma or before "and/but/…" nearest the middle.
+    const words = text.split(/\s+/).filter(Boolean);
+    const mid = words.length / 2;
+    let best = -1;
+    words.forEach((w, i) => {
+      if (i < 2 || i > words.length - 2) return;
+      const cut = /[,;:]$/.test(w) ? i + 1 : /^(and|but|so|because|while|when|which|then)$/i.test(w) ? i : -1;
+      if (cut > 0 && (best < 0 || Math.abs(cut - mid) < Math.abs(best - mid))) best = cut;
+    });
+    if (best < 0) {
+      if (words.length < 16) return [text, '']; // no natural place – don't chop a short sentence
+      best = Math.round(mid);
+    }
+    return [words.slice(0, best).join(' '), words.slice(best).join(' ')];
+  }
+
+  function builderInfo(note) {
+    const rows = builder().rows;
+    const words = rows.reduce((n, r) => n + wordCount(r.narration), 0);
+    const secs = Math.round(words / 2.5);
+    const custom = rows.filter((r) => r.prompt.trim()).length;
+    const chapters = rows.filter((r) => r.chapter.trim()).length;
+    $('sbInfo').textContent =
+      note ||
+      (rows.length
+        ? `${rows.length} scenes · about ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} of narration · ` +
+          `${custom} with their own picture` + (chapters ? ` · ${chapters} chapter(s)` : '')
+        : 'No scenes yet – paste your script above and click "Split into scenes".');
+    $('sbUse').disabled = !rows.length || state.running;
+    $('sbSave').disabled = !rows.length;
+  }
+
+  function renderBuilder() {
+    const box = $('sbRows');
+    box.textContent = '';
+    const rows = builder().rows;
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'sb-empty';
+      empty.textContent = 'Your scenes will appear here.';
+      box.append(empty);
+      return builderInfo();
+    }
+    const head = document.createElement('div');
+    head.className = 'sb-row head';
+    for (const t of ['#', 'Narration – what is said', 'Picture – optional (empty = the narration is used)', '']) {
+      const s = document.createElement('span');
+      s.textContent = t;
+      head.append(s);
+    }
+    box.append(head);
+    rows.forEach((r, i) => {
+      const row = document.createElement('div');
+      row.className = 'sb-row';
+      row.dataset.i = i;
+      const num = document.createElement('span');
+      num.className = 'sb-num';
+      num.textContent = i + 1;
+      const left = document.createElement('div');
+      const ch = document.createElement('input');
+      ch.type = 'text';
+      ch.className = 'sb-ch';
+      ch.placeholder = 'Chapter title (optional)';
+      ch.value = r.chapter;
+      ch.dataset.f = 'chapter';
+      const narr = document.createElement('textarea');
+      narr.value = r.narration;
+      narr.dataset.f = 'narration';
+      left.append(ch, narr);
+      const pic = document.createElement('textarea');
+      pic.value = r.prompt;
+      pic.placeholder = r.narration;
+      pic.dataset.f = 'prompt';
+      pic.title = 'Describe the picture for this scene. Leave empty to use the narration.';
+      const acts = document.createElement('div');
+      acts.className = 'sb-acts';
+      for (const [label, action, title] of [
+        ['↑ Merge', 'merge', 'Join this scene onto the one above'],
+        ['✂ Split', 'split', 'Cut this scene in two'],
+        ['Delete', 'del', 'Remove this scene']
+      ]) {
+        const b = document.createElement('button');
+        b.textContent = label;
+        b.dataset.a = action;
+        b.title = title;
+        if (action === 'merge' && i === 0) b.disabled = true;
+        acts.append(b);
+      }
+      row.append(num, left, pic, acts);
+      box.append(row);
+    });
+    builderInfo();
+  }
+
+  function openBuilder() {
+    $('sbScript').value = builder().script;
+    $('sbMode').value = builder().mode;
+    $('sbName').value = builder().name;
+    renderBuilder();
+    $('sb').hidden = false;
+    if (!builder().rows.length) $('sbScript').focus();
+  }
+
+  function closeBuilder() {
+    $('sb').hidden = true;
+    save();
+  }
+
+  $('build').onclick = openBuilder;
+  $('sbClose').onclick = closeBuilder;
+  $('sb').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeBuilder();
+  });
+  $('sbScript').oninput = () => {
+    builder().script = $('sbScript').value;
+    saveSoon();
+  };
+  $('sbMode').onchange = () => {
+    builder().mode = $('sbMode').value;
+    saveSoon();
+  };
+  $('sbName').oninput = () => {
+    builder().name = $('sbName').value;
+    saveSoon();
+  };
+
+  let replaceArmed = 0;
+  $('sbSplit').onclick = () => {
+    const text = $('sbScript').value.trim();
+    if (!text) return builderInfo('Paste your script in the box first.');
+    // Replacing scenes you may have edited needs a second click.
+    if (builder().rows.length && Date.now() - replaceArmed > 4000) {
+      replaceArmed = Date.now();
+      $('sbSplit').textContent = 'Click again to replace the scenes';
+      setTimeout(() => ($('sbSplit').textContent = 'Split into scenes ↓'), 4000);
+      return;
+    }
+    replaceArmed = 0;
+    $('sbSplit').textContent = 'Split into scenes ↓';
+    builder().script = $('sbScript').value;
+    builder().mode = $('sbMode').value;
+    builder().rows = splitScript(text, builder().mode);
+    save();
+    renderBuilder();
+  };
+
+  $('sbRows').addEventListener('input', (e) => {
+    const field = e.target.dataset && e.target.dataset.f;
+    const row = e.target.closest('.sb-row');
+    if (!field || !row) return;
+    builder().rows[+row.dataset.i][field] = e.target.value;
+    if (field === 'narration') row.querySelector('[data-f="prompt"]').placeholder = e.target.value;
+    builderInfo();
+    saveSoon();
+  });
+
+  $('sbRows').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-a]');
+    if (!b) return;
+    const i = +b.closest('.sb-row').dataset.i;
+    const rows = builder().rows;
+    if (b.dataset.a === 'merge' && i > 0) {
+      const [prev, cur] = [rows[i - 1], rows[i]];
+      prev.narration = `${prev.narration} ${cur.narration}`.trim();
+      if (cur.prompt.trim()) prev.prompt = prev.prompt.trim() ? `${prev.prompt.trim()}; ${cur.prompt.trim()}` : cur.prompt;
+      if (!prev.chapter && cur.chapter) prev.chapter = cur.chapter;
+      rows.splice(i, 1);
+    } else if (b.dataset.a === 'split') {
+      const [a, rest] = splitInTwo(rows[i].narration);
+      if (!rest) return builderInfo(`Scene ${i + 1} has no natural place to split (no second sentence or comma) – edit its text instead.`);
+      rows[i].narration = a;
+      rows.splice(i + 1, 0, { narration: rest, prompt: '', chapter: '' });
+    } else if (b.dataset.a === 'del') {
+      rows.splice(i, 1);
+    }
+    save();
+    renderBuilder();
+  });
+
+  $('sbAdd').onclick = () => {
+    builder().rows.push({ narration: '', prompt: '', chapter: '' });
+    renderBuilder();
+    const areas = $('sbRows').querySelectorAll('textarea[data-f="narration"]');
+    if (areas.length) areas[areas.length - 1].focus();
+  };
+
+  $('sbSave').onclick = async () => {
+    const name = `${safeName()}.txt`;
+    const blob = new Blob([rowsToSceneFile(builder().rows.filter((r) => r.narration.trim()))], { type: 'text/plain' });
+    try {
+      let dir = canPickFolder ? await folderReady(true) : null;
+      if (!dir && canPickFolder) dir = await chooseFolder().catch(() => null);
+      if (dir) {
+        const fh = await dir.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        builderInfo(`Saved ${name} in your save folder "${dir.name}".`);
+        return log(`Scene Builder: saved ${name} in "${dir.name}"`);
+      }
+    } catch (e) {
+      log(`Scene Builder: folder save failed (${e.message}) – using Chrome Downloads`);
+    }
+    const folder = state.settings.folder.replace(/[\\:*?"<>|]/g, '_');
+    const res = await chrome.runtime.sendMessage({ type: 'download', url: await blobToDataUrl(blob), filename: `${folder}/${name}` });
+    builderInfo(res && res.ok ? `Saved ${name} in Downloads/${folder}.` : `Save failed: ${res && res.error}`);
+  };
+
+  $('sbUse').onclick = () => {
+    const rows = builder().rows.filter((r) => r.narration.trim());
+    if (!rows.length || state.running) return;
+    state.prompts = rows.map((r) => ({
+      narration: r.narration.trim().replace(/\|/g, '/'),
+      text: (r.prompt.trim() || r.narration.trim()).replace(/\|/g, '/'),
+      chapter: r.chapter.trim(),
+      status: 'pending',
+      images: 0
+    }));
+    state.fileName = `${safeName()}.txt`;
+    state.runFolder = '';
+    rawFileText = '';
+    save();
+    render();
+    closeBuilder();
+    const custom = rows.filter((r) => r.prompt.trim()).length;
+    log(`Scene Builder: ${rows.length} scenes ready (${custom} with their own picture) – press Start`);
+  };
+
+  // Keep Flow's own keyboard shortcuts from reacting while you type in the panel.
+  for (const type of ['keydown', 'keyup', 'keypress', 'paste', 'copy', 'cut']) {
+    host.addEventListener(type, (e) => e.stopPropagation());
   }
 
   $('pick').onclick = () => $('file').click();
