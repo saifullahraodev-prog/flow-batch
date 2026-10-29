@@ -8,7 +8,7 @@ Turns a folder of images + one narration file into a 1920x1080 MP4 for YouTube.
   (.srt) and a YouTube description with chapters are written too.
 * Without a script: each image gets an equal share of the audio.
 * Options: slow zoom on every image, quiet background music that dips while
-  the narrator speaks.
+  the narrator speaks, subtitles burned into the picture.
 
 Double-click "Make Video.bat" (or run: python make_video.py).
 Needs FFmpeg (winget install Gyan.FFmpeg) and, for narration matching,
@@ -39,6 +39,10 @@ ZOOM = 0.08               # slow zoom: 8 % in (or out) over each image
 MUSIC_LEVELS = {"Quiet": 0.10, "Medium": 0.18, "Loud": 0.28}
 SUB_MAX_CHARS = 42        # one subtitle line
 SUB_MAX_SECONDS = 5.0
+# Burned-in subtitles: small white text, thin black outline, near the bottom.
+# (Sizes are on libass's 288-line canvas, scaled up to 1080: 12 ≈ 45 px.)
+SUB_STYLE = ("FontName=Arial,FontSize=12,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
+             "BorderStyle=1,Outline=1,Shadow=0,MarginV=14")
 CHAPTER_MIN = 10          # YouTube: every chapter at least 10 s, at least 3 chapters
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # hide ffmpeg console windows
 
@@ -81,11 +85,12 @@ def audio_channels(ffprobe, audio):
         return 2
 
 
-def run_ffmpeg(cmd, total=None, on_fraction=None):
+def run_ffmpeg(cmd, total=None, on_fraction=None, cwd=None):
     """Run FFmpeg; report progress (0–1) from its -progress output when total is given."""
     if total and on_fraction:
         cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=NO_WINDOW)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd,
+                                creationflags=NO_WINDOW)
         for line in proc.stdout:
             if line.startswith("out_time_us="):
                 try:
@@ -95,7 +100,7 @@ def run_ffmpeg(cmd, total=None, on_fraction=None):
         err = proc.stderr.read()
         code = proc.wait()
     else:
-        r = subprocess.run(cmd, capture_output=True, text=True, creationflags=NO_WINDOW)
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, creationflags=NO_WINDOW)
         err, code = r.stderr, r.returncode
     if code != 0:
         raise RuntimeError(f"FFmpeg failed:\n{err.strip()[-1500:]}")
@@ -471,7 +476,7 @@ def write_youtube_text(path, title, chapters, total):
 # ---------- build ----------
 
 def build_video(plan, audio, output, background, on_progress, on_status=lambda s: None,
-                zoom=False, music=None, music_level="Quiet"):
+                zoom=False, music=None, music_level="Quiet", burn_subs=False):
     """Make the MP4 from plan_scenes().
 
     Returns (total_seconds, durations, note, extra_files).
@@ -618,8 +623,19 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
             cmd += ["-stream_loop", "-1", "-i", str(music), "-filter_complex", graph, "-map", "0:v", "-map", "[mix]"]
         else:
             cmd += ["-map", "0:v", "-map", "1:a"]
-        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart", str(output)]
-        run_ffmpeg(cmd, total, lambda f: on_progress(base + p_video + (1 - base - p_video) * f))
+        if burn_subs and plan["lines"]:
+            # Draw the subtitles into the picture (re-encodes the video). The .srt is
+            # copied into the temp folder and read by a plain relative name, because
+            # Windows paths (C:\…) break FFmpeg's filter syntax.
+            shutil.copy(srt, tmp / "subs.srt")
+            cmd += ["-vf", f"subtitles=subs.srt:force_style='{SUB_STYLE}'",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        else:
+            cmd += ["-c:v", "copy"]
+        cmd += ["-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart", str(output)]
+        if burn_subs and plan["lines"]:
+            on_status("Adding the sound and subtitles…")
+        run_ffmpeg(cmd, total, lambda f: on_progress(base + p_video + (1 - base - p_video) * f), cwd=tmp)
     return total, durations, note, extra_files
 
 
@@ -637,6 +653,7 @@ class App(tk.Tk):
         self.music_level = tk.StringVar(value="Quiet")
         self.first_only = tk.BooleanVar(value=True)
         self.zoom = tk.BooleanVar(value=False)
+        self.subs = tk.BooleanVar(value=False)
         self.bg = tk.StringVar(value="white")
         self.status = tk.StringVar(value="Pick the images folder and the narration audio.")
 
@@ -677,6 +694,7 @@ class App(tk.Tk):
         ttk.Checkbutton(opts, text="Only the first image of each prompt (001_…_1)", variable=self.first_only,
                         command=self.refresh_count).pack(side="left")
         ttk.Checkbutton(opts, text="Slow zoom on images", variable=self.zoom).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(opts, text="Subtitles on the video", variable=self.subs).pack(side="left", padx=(12, 0))
         ttk.Label(opts, text="   Border:").pack(side="left")
         ttk.Combobox(opts, textvariable=self.bg, values=["white", "black"], width=7, state="readonly").pack(side="left")
 
@@ -782,8 +800,11 @@ class App(tk.Tk):
                 total, durations, note, extra = build_video(
                     plan, audio, output, self.bg.get(), progress, status,
                     zoom=self.zoom.get(), music=music or None, music_level=self.music_level.get(),
+                    burn_subs=self.subs.get(),
                 )
                 mode = "matched to the narration" if plan["script"] else "equal timing"
+                if self.subs.get() and not plan["script"]:
+                    note += " No subtitles on the video – they need a script (scenes.txt)."
                 files = [f"{output.stem}_timings.csv"] + extra
                 msg = (f"Done! {output}\n{n_images} images, {total:.0f} s, {mode} "
                        f"(shortest {min(durations):.1f} s, longest {max(durations):.1f} s). {note}\n"

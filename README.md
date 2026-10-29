@@ -291,7 +291,10 @@ in order**, as **one** audio file (`.mp3`, `.wav`, `.m4a`…).
    the end, and automatically gets quieter while the narrator speaks.
 6. *(Optional)* tick **Slow zoom on images** – each picture slowly zooms in or
    out (alternating), which keeps still images feeling alive.
-7. Click **Make video**.
+7. *(Optional)* tick **Subtitles on the video** – the narration is written
+   along the bottom of the picture in small white letters with a thin black
+   outline, readable on light and dark images (needs `scenes.txt` or a script).
+8. Click **Make video**.
 
 The tool first listens to the narration (progress bar 0–45 %), then builds the
 video. When it's done it offers to open the folder.
@@ -303,7 +306,7 @@ Next to the video you'll find:
 | File | Use on YouTube |
 |---|---|
 | `….mp4` | The video to upload |
-| `….srt` | **Subtitles** – in YouTube Studio: *Subtitles → Add language → Upload file → With timing*. Spelled exactly like your script |
+| `….srt` | **Subtitles** – in YouTube Studio: *Subtitles → Add language → Upload file → With timing*. Spelled exactly like your script. (Skip this if you ticked *Subtitles on the video* – otherwise viewers with captions on see the text twice) |
 | `…_youtube.txt` | **Description with chapters** – copy the chapter list into the video's description; YouTube turns it into clickable chapters |
 | `…_timings.csv` | For you: when each picture starts (to check timing) |
 
@@ -443,6 +446,7 @@ Welcome aboard. Today we follow a small cargo ship across the ocean. | stickman 
 | Only the first image of each prompt | On: one image per scene (`_1`, or `_2` if `_1` was deleted). Off: all images of a scene share its time |
 | Background music (optional) | A music file and its volume (Quiet / Medium / Loud). Loops, fades out over the last 3 s, and dips about 8 dB whenever the narrator speaks. **✕** clears it |
 | Slow zoom on images | Each image slowly zooms in or out by 8 % (alternating). Takes longer to build |
+| Subtitles on the video | Burns the subtitles into the picture: small white Arial with a thin black outline, near the bottom. Always visible – also on Shorts, embeds and phones with captions off. The `.srt` is still written. Needs a script / `scenes.txt`. Adds a little build time (the video is encoded once more) |
 | Border | White or black bars around images that are not 16:9 |
 | Summary line | Number of scenes, chapter titles and images, ✓ if every scene has an image, or which scenes are missing |
 
@@ -530,7 +534,8 @@ Builder practice with `script.txt` – are in the
 
 A 30-second video takes about a minute; a 10-minute video a few minutes
 (most of the time is spent listening to the narration). **Slow zoom** adds
-time, since every frame is drawn separately.
+time, since every frame is drawn separately. **Subtitles on the video** adds a
+little, since the finished picture is encoded once more.
 
 ---
 
@@ -580,7 +585,9 @@ ends.
 6. **Picture track** – still images joined with their durations, or (slow zoom)
    one zoompan clip per image with frame counts from the running total so cuts
    stay exact, then joined.
-7. **Sound** – the narration; with music, the music is looped, faded out and
+7. **Sound** (and burned-in subtitles, if ticked: FFmpeg's `subtitles` filter
+   with a fixed small white style, reading a copy of the `.srt` from the temp
+   folder) – the narration; with music, the music is looped, faded out and
    ducked under the voice (`sidechaincompress`), then mixed. A mono voice is
    copied to both channels at full level.
 
