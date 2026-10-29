@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 *.mp4
+# Files Make Video writes next to a video
+*_timings.csv
+*_youtube.txt
+*.srt
