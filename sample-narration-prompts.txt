@@ -1,0 +1,21 @@
+# Sample prompt file: narration in brackets, image prompt on the line below.
+# Load it with "Load .txt file…" in the Flow Batch panel.
+# "## Title" starts a YouTube chapter; other lines starting with # are notes.
+
+## Leaving port
+(Welcome aboard. Today we follow a small cargo ship across the ocean.)
+stickman captain waving from a small cargo ship in the harbour
+
+(The crew loads hundreds of containers before sunrise.)
+stickman crew loading containers with a crane at dawn
+
+## The storm
+(Suddenly, dark clouds appear on the horizon.)
+dark storm clouds over the sea, small cargo ship in the distance
+
+(The waves grow taller, but the ship holds steady.)
+small cargo ship riding huge waves, stickman crew holding on
+
+## Safe arrival
+(Another voyage is complete. Thanks for watching!)
+cargo ship docked in the port at night, stickman crew waving goodbye

@@ -81,10 +81,26 @@
 
   // Scenes from the loaded file. A "## Chapter title" line names the chapter that
   // starts at the next scene (kept in scenes.txt for Make Video's YouTube chapters).
+  // A line in brackets – "(narration)" – is the narration of the prompt below it.
+  const NARRATION_LINE = /^\(([\s\S]*)\)$/;
+
+  function withNarration(scene, said) {
+    if (said.length && !scene.narration) scene.narration = said.join(' ').replace(/\|/g, '/');
+    return scene;
+  }
+
   function parseScenes(text, mode) {
-    if (mode === 'blank') return parsePrompts(text, mode).map((line) => ({ ...splitScene(line), chapter: '' }));
+    if (mode === 'blank') {
+      return parsePrompts(text, mode).map((block) => {
+        const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+        const said = [];
+        while (lines.length > 1 && NARRATION_LINE.test(lines[0])) said.push(lines.shift().match(NARRATION_LINE)[1].trim());
+        return { ...withNarration(splitScene(lines.join(' ')), said), chapter: '' };
+      });
+    }
     const scenes = [];
     let chapter = '';
+    let said = [];
     for (const raw of text.replace(/\r\n?/g, '\n').replace(/^﻿/, '').split('\n')) {
       const line = raw.trim();
       if (!line) continue;
@@ -94,9 +110,16 @@
         continue;
       }
       if (line.startsWith('#')) continue;
-      scenes.push({ ...splitScene(line), chapter });
+      const n = line.match(NARRATION_LINE);
+      if (n) {
+        said.push(n[1].trim());
+        continue;
+      }
+      scenes.push({ ...withNarration(splitScene(line), said), chapter });
       chapter = '';
+      said = [];
     }
+    if (said.length) scenes.push({ ...withNarration({ text: '', narration: '' }, said), chapter });
     return scenes;
   }
 
@@ -920,7 +943,7 @@
   }
 
   // Write one file into this run's folder (chosen save folder, or Chrome Downloads).
-  async function writeToRun(name, blob) {
+  async function writeToRun(name, blob, replace = false) {
     const runDir = state.runFolder || 'FlowBatch';
     const dir = await folderReady(false);
     if (dir) {
@@ -939,22 +962,33 @@
     const res = await chrome.runtime.sendMessage({
       type: 'download',
       url: await blobToDataUrl(blob),
-      filename: `${folder}/${runDir}/${name}`
+      filename: `${folder}/${runDir}/${name}`,
+      replace
     });
     if (!res || !res.ok) throw new Error((res && res.error) || 'download failed');
   }
 
   // Save scenes.txt next to the images: Make Video reads the narration from it.
-  async function saveSceneFile() {
+  // Above every scene a "# image:" note names the image file(s) saved for it; the
+  // file is rewritten after each prompt, so it always matches the folder.
+  async function saveSceneFile(quiet) {
     if (!state.prompts.some((p) => p.narration)) return;
-    const lines = ['# Scene file written by Flow Batch - one line per image: narration | image prompt'];
-    for (const p of state.prompts) {
+    const lines = [
+      '# Scene file written by Flow Batch - one line per image: narration | image prompt',
+      '# The "# image:" line above each scene names the image saved for it.',
+      ''
+    ];
+    state.prompts.forEach((p, i) => {
       if (p.chapter) lines.push(`## ${p.chapter}`);
+      const files = p.files && p.files.length ? p.files.join(', ')
+        : p.status === 'done' ? '(not saved)'
+        : p.status === 'error' || p.status === 'timeout' ? '(failed - use Retry failed)' : '(not made yet)';
+      lines.push(`# image: ${files}`);
       lines.push(`${p.narration || ''} | ${p.text}`);
-    }
+    });
     try {
-      await writeToRun('scenes.txt', new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/plain' }));
-      log('Saved scenes.txt (narration for Make Video) in the run folder');
+      await writeToRun('scenes.txt', new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/plain' }), true);
+      if (!quiet) log('Saved scenes.txt (narration + image names, for Make Video) in the run folder');
     } catch (e) {
       log(`Could not save scenes.txt: ${e.message}`);
     }
@@ -963,6 +997,7 @@
   async function saveImages(index, srcs) {
     const base = `${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
     let saved = 0;
+    const names = [];
     const hashes = new Set();
     for (let k = 0; k < srcs.length; k++) {
       try {
@@ -972,12 +1007,15 @@
         const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
         if (hashes.has(hash)) continue;
         hashes.add(hash);
-        await writeToRun(`${base}_${saved + 1}.${extFor(srcs[k], blob.type)}`, blob);
+        const name = `${base}_${saved + 1}.${extFor(srcs[k], blob.type)}`;
+        await writeToRun(name, blob);
+        names.push(name);
         saved++;
       } catch (e) {
         log(`Save failed: ${e.message}`);
       }
     }
+    state.prompts[index].files = names;
     return saved;
   }
 
@@ -1036,6 +1074,7 @@
       }
       save();
       render();
+      if (state.settings.autoDownload) await saveSceneFile(true);
       if (i < state.prompts.length - 1) await interruptibleSleep(state.settings.delaySec * 1000);
     }
 
@@ -1336,7 +1375,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     const scenes = state.prompts.filter((p) => p.narration).length;
     log(`Loaded ${state.prompts.length} prompts` + (scenes ? ` (scene file: ${scenes} with narration)` : ''));
     const empty = state.prompts.findIndex((p) => !p.text);
-    if (empty >= 0) log(`⚠ Line ${empty + 1} has narration but no image prompt after "|"`);
+    if (empty >= 0) log(`⚠ Scene ${empty + 1} has narration but no image prompt (after "|" or on the line below the (narration))`);
     if (!scenes && state.prompts.some((p) => wordCount(p.text) > 30)) {
       log('Tip: this looks like a plain script. Use Scene Builder… to split it into scenes with narration.');
     }
@@ -1673,6 +1712,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     state.prompts.forEach((p) => {
       p.status = 'pending';
       p.images = 0;
+      p.files = [];
     });
     save();
     render();

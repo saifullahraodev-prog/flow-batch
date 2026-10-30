@@ -37,6 +37,7 @@ LEAD_IN = 0.15            # show the image this many seconds before its first wo
 MIN_SCENE = 0.5           # never show an image for less than this
 ZOOM = 0.08               # slow zoom: 8 % in (or out) over each image
 MUSIC_LEVELS = {"Quiet": 0.10, "Medium": 0.18, "Loud": 0.28}
+MISSING_BELOW = 0.3       # a scene with fewer of its words heard counts as "not in the audio"
 SUB_MAX_CHARS = 42        # one subtitle line
 SUB_MAX_SECONDS = 5.0
 # Burned-in subtitles: small white text, thin black outline, near the bottom.
@@ -130,14 +131,25 @@ def pick_images(folder, first_per_prompt):
 def parse_scene_file(path):
     """Narration per scene, and chapter titles.
 
-    Scene lines are "narration | image prompt" (or just narration). A line
-    "## Title" starts a chapter at the next scene; other "#" lines are notes.
+    Scene lines are "narration | image prompt" (or just narration). Or the
+    prompt file's own format: a "(narration)" line in brackets, with the image
+    prompt on the line below it. A line "## Title" starts a chapter at the next
+    scene; other "#" lines are notes.
     Returns (lines, chapters) with chapters = {scene_index: title}.
     """
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
-    lines, chapters, pending = [], {}, None
-    for raw in text.splitlines():
-        line = raw.strip()
+    rows = [r.strip() for r in text.splitlines()]
+    bracketed = any(re.match(r"^\(.*\)$", r) for r in rows)
+    lines, chapters, pending, said = [], {}, None, []
+
+    def add(narration):
+        nonlocal pending
+        if pending:
+            chapters[len(lines)] = pending
+            pending = None
+        lines.append(narration)
+
+    for line in rows:
         if not line:
             continue
         m = re.match(r"^##\s*(.+)$", line)
@@ -146,10 +158,17 @@ def parse_scene_file(path):
             continue
         if line.startswith("#"):
             continue
-        if pending:
-            chapters[len(lines)] = pending
-            pending = None
-        lines.append(line.split("|", 1)[0].strip() if "|" in line else line)
+        if bracketed:
+            n = re.match(r"^\((.*)\)$", line)
+            if n:
+                said.append(n.group(1).strip())
+            else:  # the image prompt: one scene, narrated by the bracket line(s) above it
+                add(" ".join(said) if said else (line.split("|", 1)[0].strip() if "|" in line else ""))
+                said = []
+            continue
+        add(line.split("|", 1)[0].strip() if "|" in line else line)
+    if said:
+        add(" ".join(said))
     return lines, chapters
 
 
@@ -291,45 +310,67 @@ def align(lines, spoken):
     return s_line, start_of, end_of, len(start_of) / max(1, len(s_tok))
 
 
-def scene_starts(lines, aligned, total):
-    """When each script line starts: the time of its first matched word."""
+def narration_missing(lines, aligned):
+    """Scenes whose narration is not in the audio (not recorded, or cut out):
+    none – or hardly any – of their words were heard."""
     s_line, start_of, _, _ = aligned
-    starts = []
-    for i in range(len(lines)):
+    count, found = [0] * len(lines), [0] * len(lines)
+    for j, li in enumerate(s_line):
+        count[li] += 1
+        found[li] += j in start_of
+    return [i for i in range(len(lines))
+            if count[i] and (found[i] == 0 or (count[i] >= 4 and found[i] / count[i] < MISSING_BELOW))]
+
+
+def scene_starts(lines, aligned, total, skip=()):
+    """When each script line starts: the time of its first matched word.
+
+    Scenes in skip (narration not in the audio) get no time: their start is the
+    next scene's start.
+    """
+    s_line, start_of, _, _ = aligned
+    keep = [i for i in range(len(lines)) if i not in skip]
+    starts = {}
+    for i in keep:
         idx = [j for j, li in enumerate(s_line) if li == i]
         first = next((j for j in idx if j in start_of), None)
-        if first is None:
-            starts.append(None)
-        else:
-            # If the line's first words weren't recognised, step back ~0.35 s per word.
-            starts.append(max(0.0, start_of[first] - 0.35 * (first - idx[0]) - LEAD_IN))
+        # If the line's first words weren't recognised, step back ~0.35 s per word.
+        starts[i] = None if first is None else max(0.0, start_of[first] - 0.35 * (first - idx[0]) - LEAD_IN)
 
     # Lines with no recognised words: place them evenly between their neighbours.
-    known = [(i, s) for i, s in enumerate(starts) if s is not None]
+    known = [(i, s) for i, s in starts.items() if s is not None]
     if not known:
         raise RuntimeError("None of the script's words were found in the narration – is it the right script for this audio?")
-    for i, s in enumerate(starts):
-        if s is None:
+    for i in keep:
+        if starts[i] is None:
             prev = max(((j, t) for j, t in known if j < i), default=(-1, 0.0))
             nxt = min(((j, t) for j, t in known if j > i), default=(len(lines), total))
             starts[i] = prev[1] + (nxt[1] - prev[1]) * (i - prev[0]) / (nxt[0] - prev[0])
 
     # First image from the very start; keep order and a minimum length per image.
-    starts[0] = 0.0
-    for i in range(1, len(starts)):
-        starts[i] = max(starts[i], starts[i - 1] + MIN_SCENE)
-    for i in range(len(starts) - 1, 0, -1):  # don't run past the end of the audio
-        starts[i] = min(starts[i], total - MIN_SCENE * (len(starts) - i))
-    return starts
+    seq = [starts[i] for i in keep]
+    seq[0] = 0.0
+    for k in range(1, len(seq)):
+        seq[k] = max(seq[k], seq[k - 1] + MIN_SCENE)
+    for k in range(len(seq) - 1, 0, -1):  # don't run past the end of the audio
+        seq[k] = min(seq[k], total - MIN_SCENE * (len(seq) - k))
+    out, nxt = [None] * len(lines), total
+    for i, t in zip(keep, seq):
+        out[i] = t
+    for i in range(len(lines) - 1, -1, -1):
+        if out[i] is None:
+            out[i] = nxt
+        nxt = out[i]
+    return out
 
 
 # ---------- subtitles & chapters ----------
 
-def word_timeline(lines, aligned, total):
+def word_timeline(lines, aligned, total, skip=()):
     """Every script word (with its punctuation and spelling) with spoken start/end times.
 
     Words the speech model didn't catch get times interpolated from their neighbours.
-    Returns [[scene_index, word, start, end], …].
+    Scenes in skip (not in the audio) are left out. Returns [[scene_index, word, start, end], …].
     """
     _, start_of, end_of, _ = aligned
     timed, j = [], 0
@@ -339,7 +380,8 @@ def word_timeline(lines, aligned, total):
             ks = range(j, j + n)
             st = min((start_of[k] for k in ks if k in start_of), default=None)
             en = max((end_of[k] for k in ks if k in end_of), default=None)
-            timed.append([i, w, st, en])
+            if i not in skip:
+                timed.append([i, w, st, en])
             j += n
     known = [k for k, t in enumerate(timed) if t[2] is not None]
     if not known:
@@ -430,7 +472,7 @@ def short_title(line):
     return " ".join(words[:7]) + ("…" if len(words) > 7 else "")
 
 
-def make_chapters(lines, chapters, starts, total):
+def make_chapters(lines, chapters, starts, total, skip=()):
     """[(seconds, title)] following YouTube's rules – first at 0:00, at least 3,
     each at least 10 s – or [] if the video is too short for chapters.
 
@@ -445,7 +487,7 @@ def make_chapters(lines, chapters, starts, total):
         n = max(3, min(10, round(total / 60)))
         marks, target = [], 0.0
         for i, s in enumerate(starts):
-            if s >= target - 1e-6:
+            if i not in skip and s >= target - 1e-6:
                 marks.append((s, short_title(lines[i])))
                 target = len(marks) * total / n
     marks[0] = (0.0, marks[0][1])
@@ -476,9 +518,11 @@ def write_youtube_text(path, title, chapters, total):
 # ---------- build ----------
 
 def build_video(plan, audio, output, background, on_progress, on_status=lambda s: None,
-                zoom=False, music=None, music_level="Quiet", burn_subs=False):
+                zoom=False, music=None, music_level="Quiet", burn_subs=False, confirm=lambda msg: True):
     """Make the MP4 from plan_scenes().
 
+    confirm(message) -> bool is asked when some scenes' narration is not in the
+    audio; False stops without making a video.
     Returns (total_seconds, durations, note, extra_files).
     """
     ffmpeg, ffprobe = find_tool("ffmpeg"), find_tool("ffprobe")
@@ -487,17 +531,34 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
 
     total = audio_duration(ffprobe, audio)
     scenes, lines = plan["scenes"], plan["lines"]
-    note, extra_files = "", []
+    note, extra_files, skip = "", [], set()
     # Progress bar: listening (if any) → preparing images → video → final mix.
     if lines:
         p_listen, p_img, p_video = 0.45, 0.07, 0.40
         spoken = transcribe_words(ffmpeg, audio, total, lambda f: on_progress(p_listen * f), on_status)
         aligned = align(lines, spoken)
-        starts = scene_starts(lines, aligned, total)
+        skip = set(narration_missing(lines, aligned))
+        if len(skip) == len(lines):
+            skip = set()  # nothing matches at all: wrong script or audio – scene_starts reports it
+        if skip:
+            cut = lambda t: t if len(t) <= 90 else t[:87].rstrip() + "…"
+            listed = "\n".join(f"  Scene {i + 1}: \"{cut(lines[i])}\"" for i in sorted(skip)[:12])
+            more = f"\n  … and {len(skip) - 12} more" if len(skip) > 12 else ""
+            if not confirm(
+                f"This narration is not in the audio (not recorded, or cut out):\n\n{listed}{more}\n\n"
+                "Make the video anyway? Those scenes are left out – their images are not shown.\n\n"
+                "Or click No, record the missing narration, and try again."
+            ):
+                raise RuntimeError("Stopped – narration not in the audio for scene(s) "
+                                   + ", ".join(str(i + 1) for i in sorted(skip)) + ". Nothing was made.")
+        starts = scene_starts(lines, aligned, total, skip)
         matched = aligned[3]
         note = f"{matched:.0%} of the script's words were found in the narration."
         if matched < 0.5:
             note += " That is low – check that the script matches this audio."
+        if skip:
+            note += (" Narration not in the audio – left out: scene(s) "
+                     + ", ".join(str(i + 1) for i in sorted(skip)) + ".")
     else:
         p_listen, p_img, p_video = 0.0, 0.15, 0.75
         lines = [""] * len(scenes)
@@ -508,6 +569,8 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
     # the previous image on screen; several images in one scene share its time.
     shots, carry = [], 0.0
     for imgs, s, d in zip(scenes, starts, scene_len):
+        if d <= 1e-6:  # narration not in the audio: the scene is left out
+            continue
         if not imgs:
             if shots:
                 img, s0, d0 = shots[-1]
@@ -525,21 +588,22 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
     chapter_at = plan.get("chapters") or {}
     with open(output.with_name(output.stem + "_timings.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["scene", "image", "starts_at", "seconds", "chapter", "narration"])
+        w.writerow(["scene", "image", "starts_at", "seconds", "chapter", "narration", "narration_in_audio"])
         for i, (imgs, s, d, line) in enumerate(zip(scenes, starts, scene_len, lines), 1):
             name = " + ".join(p.name for p in imgs) or "(no image - previous one stays)"
-            w.writerow([i, name, f"{int(s // 60)}:{s % 60:05.2f}", f"{d:.2f}", chapter_at.get(i - 1, ""), line])
+            heard = "" if not plan["lines"] else "NO - scene left out" if i - 1 in skip else "yes"
+            w.writerow([i, name, f"{int(s // 60)}:{s % 60:05.2f}", f"{d:.2f}", chapter_at.get(i - 1, ""), line, heard])
 
     # Subtitles and YouTube description (need the narration text).
     if plan["lines"]:
-        cues = subtitle_cues(word_timeline(lines, aligned, total), total)
+        cues = subtitle_cues(word_timeline(lines, aligned, total, skip), total)
         srt = output.with_suffix(".srt")
         srt.write_text(
             "\n".join(f"{n}\n{srt_time(a)} --> {srt_time(b)}\n{text}\n" for n, (a, b, text) in enumerate(cues, 1)),
             encoding="utf-8",
         )
         yt = output.with_name(output.stem + "_youtube.txt")
-        write_youtube_text(yt, output.stem.replace("_", " "), make_chapters(lines, chapter_at, starts, total), total)
+        write_youtube_text(yt, output.stem.replace("_", " "), make_chapters(lines, chapter_at, starts, total, skip), total)
         extra_files += [srt.name, yt.name]
 
     with tempfile.TemporaryDirectory(prefix="flowbatch_") as tmp:
@@ -795,12 +859,19 @@ class App(tk.Tk):
         def status(text):
             self.after(0, lambda: self.status.set(text))
 
+        def confirm(msg):
+            # Called from the worker thread: ask in the window and wait for the answer.
+            done, answer = threading.Event(), []
+            self.after(0, lambda: (answer.append(messagebox.askyesno("Make Video", msg, icon="warning")), done.set()))
+            done.wait()
+            return answer[0]
+
         def work():
             try:
                 total, durations, note, extra = build_video(
                     plan, audio, output, self.bg.get(), progress, status,
                     zoom=self.zoom.get(), music=music or None, music_level=self.music_level.get(),
-                    burn_subs=self.subs.get(),
+                    burn_subs=self.subs.get(), confirm=confirm,
                 )
                 mode = "matched to the narration" if plan["script"] else "equal timing"
                 if self.subs.get() and not plan["script"]:

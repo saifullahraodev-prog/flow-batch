@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.5.0** (shown in the panel title).
+Current version: **1.6.0** (shown in the panel title).
 
 ---
 
@@ -179,7 +179,13 @@ reloading the page loses nothing.
   is a prompt for Claude/ChatGPT that turns your script into a complete scene
   file with a tailored picture for every scene. Save the answer as a `.txt`
   and load it with **Load .txt file…**.
-- **Write the scene file yourself**, as described below.
+- **Write your own .txt with the narration in brackets**, the prompt on the
+  line below – see [Scene file format](#scene-file-format):
+  ```
+  (Welcome aboard. Today we follow a small cargo ship.)
+  stickman captain waving from a small cargo ship
+  ```
+- **Write the scene file yourself** (`narration | prompt` lines), as described below.
 
 #### The scene file (what Scene Builder makes for you)
 
@@ -316,6 +322,27 @@ Watch the video once, then upload.
 
 ## Scene file format
 
+Two ways to write a scene – use whichever you like (even mixed in one file).
+
+**A. Narration in brackets, prompt on the next line** – easiest to write by hand
+(example: [`sample-narration-prompts.txt`](sample-narration-prompts.txt)):
+
+```
+## Leaving port
+(Welcome aboard. Today we follow a small cargo ship across the ocean.)
+stickman captain waving from a small cargo ship in the harbour
+
+(The crew loads hundreds of containers before sunrise.)
+stickman crew loading containers with a crane at dawn
+```
+
+- A line wholly in `( )` is the narration; the next line without brackets is
+  the image prompt. Together they are one scene.
+- Several bracket lines in a row are joined into one narration.
+- Empty lines between scenes are fine.
+
+**B. One line per scene, `|` in between:**
+
 ```
 # Lines starting with # are notes and are skipped.
 Narration for scene 1. | image prompt for scene 1
@@ -324,8 +351,9 @@ Narration for scene 2. | image prompt for scene 2
 
 | Rule | Detail |
 |---|---|
-| One line = one scene = one picture | Line 1 → images `001_…`, line 2 → `002_…`, … |
-| Separator | The **first** `\|` on the line splits narration (left) from prompt (right) |
+| One scene = one picture | Scene 1 → images `001_…`, scene 2 → `002_…`, … |
+| Separator (format B) | The **first** `\|` on the line splits narration (left) from prompt (right) |
+| Brackets (format A) | `(narration)` line, then the prompt line. Make Video also reads this format directly if you pick the file in its **Script** box |
 | Chapters | A line `## Chapter title` starts a chapter at the next scene. Used for the YouTube description; Flow Batch keeps these lines in `scenes.txt` |
 | Comments | Other lines starting with `#`, and empty lines, are ignored |
 | Encoding | Save as UTF-8 (Notepad's default) |
@@ -407,20 +435,32 @@ extension. If the page reloads or Chrome restarts, the panel comes back and
 ### `scenes.txt` – nothing for you to do
 
 When you press **Start**, Flow Batch writes `scenes.txt` into the run folder by
-itself (the log says *"Saved scenes.txt (narration for Make Video) in the run
-folder"*). It holds the narration, picture prompt and chapters of every scene:
+itself (the log says *"Saved scenes.txt (narration + image names, for Make
+Video) in the run folder"*), and **updates it after every image is saved**. It
+holds, for every scene, the **image file name**, the narration, the picture
+prompt and the chapters – so you always have a complete list of which image
+belongs to which narration:
 
 ```
 # Scene file written by Flow Batch - one line per image: narration | image prompt
+# The "# image:" line above each scene names the image saved for it.
+
 ## Leaving port
+# image: 001_stickman-captain-waving-from-a_1.png
 Welcome aboard. Today we follow a small cargo ship across the ocean. | stickman captain waving from a small cargo ship
+# image: 002_stickman-crew-loading-containers-with_1.png
+The crew loads hundreds of containers before sunrise. | stickman crew loading containers with a crane at dawn
 ```
+
+A scene that isn't finished shows `# image: (not made yet)`; a failed one
+`# image: (failed - use Retry failed)` – after **Retry failed** the real name
+appears.
 
 - Make Video reads it automatically to time the pictures to your narration,
   write the subtitles and the chapter list. Nothing of it is sent to Flow
   except the picture prompts.
-- It is only written when your scenes have narration (Scene Builder, or a
-  scene file with `narration | picture` lines) and saving is on.
+- It is only written when your scenes have narration (Scene Builder, a
+  `(narration)` + prompt file, or `narration | picture` lines) and saving is on.
 - Don't rename or delete it. If it's ever missing: in Scene Builder click
   **Save .txt**, copy the file into the run folder and rename it `scenes.txt`
   (or pick it in Make Video's **Script** box).
@@ -464,6 +504,17 @@ Scene Builder (shorter scenes = pictures change more often; **↑ Merge** /
   word**. Each image is shown at least 0.5 s. A matching score is shown
   (e.g. *"92 % of the script's words were found"*) – below 50 % means the
   script and audio probably don't belong together.
+- **Narration missing from the audio** – if a scene's narration was not
+  recorded (or was cut out), the tool says so **by narration**, before making
+  the video:
+
+  > This narration is not in the audio (not recorded, or cut out):
+  > Scene 5: "The captain plays chess with a parrot…"
+  > Make the video anyway? Those scenes are left out – their images are not shown.
+
+  **Yes** leaves those scenes out (all other pictures stay exactly in time);
+  **No** stops, so you can record the missing part. A scene counts as missing
+  when fewer than 30 % of its words are heard (`MISSING_BELOW`).
 - **Without any script** – every image gets an equal share of the audio.
 
 ### Pairing images with scenes
@@ -529,6 +580,7 @@ Builder practice with `script.txt` – are in the
 | seconds | How long the scene is on screen |
 | chapter | Chapter title starting at this scene (if any) |
 | narration | The narration line for that scene |
+| narration_in_audio | `yes`, or `NO - scene left out` when that narration wasn't found in the audio |
 
 ### Speed
 
@@ -669,6 +721,7 @@ Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
 | "The speech library is installed but Windows can't load it" / "DLL load failed" | Run `Setup.bat` again – it installs the Microsoft Visual C++ Redistributable. Or: `winget install Microsoft.VCRedist.2015+.x64` |
 | Model download very slow / stuck | Run `Setup.bat` again – it resumes. The tool uses plain HTTP downloads for reliability |
 | "No image for scene(s) …" | Retry those scenes in Flow Batch, or continue (previous image stays) |
+| "This narration is not in the audio …" | Those lines weren't recorded (or were cut). Record them and add them to the audio, or click Yes to leave those scenes out |
 | "The script has N lines but there are M images…" | Only for images without scene numbers: make the counts equal, or name images `001_…` |
 | Low "% of words found" | The audio and script don't match – check you picked the right audio / that the narration follows the script |
 | Picture changes a bit early | By design (0.15 s lead-in so it appears as the sentence starts). Change `LEAD_IN` in `make_video.py` if wanted |

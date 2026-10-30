@@ -141,7 +141,7 @@ async function handle(msg, sender) {
       const id = await chrome.downloads.download({
         url: msg.url,
         filename: msg.filename,
-        conflictAction: 'uniquify',
+        conflictAction: msg.replace ? 'overwrite' : 'uniquify',
         saveAs: false
       });
       return { ok: true, id };
