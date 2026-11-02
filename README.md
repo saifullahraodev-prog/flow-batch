@@ -291,7 +291,9 @@ in order**, as **one** audio file (`.mp3`, `.wav`, `.m4a`…).
 2. **Images folder** → the run folder from Step 3.
 3. **Narration audio** → your recording.
 4. Leave **Script** empty – the folder's `scenes.txt` is used automatically.
-   Check the summary says **"✓ Every scene has an image"**.
+   The **Check** panel should say **"✓ Every scene has an image"**. If not, it
+   lists each scene without an image **with its narration**, so you know which
+   part it is.
 5. *(Optional)* **Background music** → a music file, and its volume
    (Quiet / Medium / Loud). It loops if shorter than the video, fades out at
    the end, and automatically gets quieter while the narrator speaks.
@@ -478,17 +480,21 @@ appears.
 
 ### The window
 
+The window has three cards – **1 Your files**, **2 Options**, **3 Check** – and
+the progress bar with **Make video** and **Open folder** at the bottom.
+
 | Field | Meaning |
 |---|---|
-| 1. Images folder | A run folder from Flow Batch (or any folder of images) |
-| 2. Narration audio | One audio file for the whole video: mp3, wav, m4a, aac, ogg, flac |
-| 3. Script (optional) | Only needed if the folder has no `scenes.txt`. A `.txt` with one narration line per scene (scene-file lines are fine too) |
+| Images folder | A run folder from Flow Batch (or any folder of images) |
+| Narration audio | One audio file for the whole video: mp3, wav, m4a, aac, ogg, flac |
+| Script (optional) | Only needed if the folder has no `scenes.txt`. A `.txt` with one narration line per scene, scene-file lines, or your `(narration)` + prompt file. **✕** clears it |
 | Only the first image of each prompt | On: one image per scene (`_1`, or `_2` if `_1` was deleted). Off: all images of a scene share its time |
 | Background music (optional) | A music file and its volume (Quiet / Medium / Loud). Loops, fades out over the last 3 s, and dips about 8 dB whenever the narrator speaks. **✕** clears it |
 | Slow zoom on images | Each image slowly zooms in or out by 8 % (alternating). Takes longer to build |
 | Subtitles on the video | Burns the subtitles into the picture: small white Arial with a thin black outline, near the bottom. Always visible – also on Shorts, embeds and phones with captions off. The `.srt` is still written. Needs a script / `scenes.txt`. Adds a little build time (the video is encoded once more) |
 | Border | White or black bars around images that are not 16:9 |
-| Summary line | Number of scenes, chapter titles and images, ✓ if every scene has an image, or which scenes are missing |
+| Check panel | Green ✓ / red ✗ list: number of scenes, images and chapters; every scene **without an image** with its narration; scenes with no narration written. After you click **Make video** and the audio is heard, every scene whose **narration is not in the audio** is added here too, with its text. At the end: the result and the files saved |
+| Open folder | Opens the folder with the finished video |
 
 ### How the timing is decided
 
@@ -544,8 +550,8 @@ exactly what a Flow Batch run leaves behind, plus extras to practise with:
 
 **Quick test:** copy `test-pack` to your Desktop → **Make Video.bat** →
 *Images folder*: the copy, *Narration*: its `narration.mp3`, *Script*: empty,
-optionally *Music*: `music.mp3` + *Slow zoom* → **Make video**. The summary
-should say *"9 scenes … 3 chapter title(s). ✓ Every scene has an image."*
+optionally *Music*: `music.mp3` + *Slow zoom* → **Make video**. The Check
+panel should say *"9 scenes from scenes.txt … 3 chapters"* and *"✓ Every scene has an image"*.
 
 You should get the video (cards appearing at about 0:00, 0:07, 0:12, 0:18,
 0:24, 0:28, 0:34, 0:37, 0:42), subtitles, and a chapter list

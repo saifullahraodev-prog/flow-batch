@@ -518,11 +518,11 @@ def write_youtube_text(path, title, chapters, total):
 # ---------- build ----------
 
 def build_video(plan, audio, output, background, on_progress, on_status=lambda s: None,
-                zoom=False, music=None, music_level="Quiet", burn_subs=False, confirm=lambda msg: True):
+                zoom=False, music=None, music_level="Quiet", burn_subs=False, confirm=lambda msg, scenes: True):
     """Make the MP4 from plan_scenes().
 
-    confirm(message) -> bool is asked when some scenes' narration is not in the
-    audio; False stops without making a video.
+    confirm(message, [(scene_number, narration), …]) -> bool is asked when some
+    scenes' narration is not in the audio; False stops without making a video.
     Returns (total_seconds, durations, note, extra_files).
     """
     ffmpeg, ffprobe = find_tool("ffmpeg"), find_tool("ffprobe")
@@ -547,7 +547,8 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
             if not confirm(
                 f"This narration is not in the audio (not recorded, or cut out):\n\n{listed}{more}\n\n"
                 "Make the video anyway? Those scenes are left out – their images are not shown.\n\n"
-                "Or click No, record the missing narration, and try again."
+                "Or click No, record the missing narration, and try again.",
+                [(i + 1, lines[i]) for i in sorted(skip)],
             ):
                 raise RuntimeError("Stopped – narration not in the audio for scene(s) "
                                    + ", ".join(str(i + 1) for i in sorted(skip)) + ". Nothing was made.")
@@ -705,10 +706,25 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
 
 # ---------- window ----------
 
+# Colours and fonts of the window.
+C_BG, C_CARD, C_LINE = "#F3F5FA", "#FFFFFF", "#E3E7EF"
+C_INK, C_MUTED = "#1F2937", "#6B7280"
+C_HEAD, C_HEAD_SUB = "#14213D", "#9FB0CF"
+C_ACCENT, C_ACCENT_DOWN = "#2563EB", "#1D4ED8"
+C_OK, C_BAD, C_WARN = "#15803D", "#B91C1C", "#B45309"
+FONT = "Segoe UI"
+
+
+def cut(text, n=80):
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Flow Batch – Make Video")
+        self.configure(bg=C_BG)
         self.resizable(False, False)
         self.folder = tk.StringVar()
         self.audio = tk.StringVar()
@@ -720,71 +736,208 @@ class App(tk.Tk):
         self.subs = tk.BooleanVar(value=False)
         self.bg = tk.StringVar(value="white")
         self.status = tk.StringVar(value="Pick the images folder and the narration audio.")
+        self.output = None
+        self._styles()
 
-        pad = {"padx": 10, "pady": 5}
-        frm = ttk.Frame(self, padding=12)
-        frm.grid()
+        # Header
+        head = tk.Frame(self, bg=C_HEAD, padx=22, pady=10)
+        head.pack(fill="x")
+        tk.Label(head, text="🎬  Make Video", bg=C_HEAD, fg="white", font=(FONT, 17, "bold")).pack(anchor="w")
+        tk.Label(head, text="Images + narration  →  a YouTube-ready video, every picture on its line",
+                 bg=C_HEAD, fg=C_HEAD_SUB, font=(FONT, 10)).pack(anchor="w")
 
-        ttk.Label(frm, text="1. Images folder").grid(row=0, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.folder, width=55).grid(row=0, column=1, **pad)
-        ttk.Button(frm, text="Browse…", command=self.pick_folder).grid(row=0, column=2, **pad)
+        body = tk.Frame(self, bg=C_BG, padx=18, pady=12)
+        body.pack(fill="both")
 
-        ttk.Label(frm, text="2. Narration audio").grid(row=1, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.audio, width=55).grid(row=1, column=1, **pad)
-        ttk.Button(frm, text="Browse…", command=self.pick_audio).grid(row=1, column=2, **pad)
+        # 1. Files
+        files = self._card(body, "1", "Your files")
+        self._file_row(files, 0, "Images folder", "The run folder from Flow Batch", self.folder, self.pick_folder)
+        self._file_row(files, 1, "Narration audio", "One audio file: mp3, wav, m4a …", self.audio, self.pick_audio)
+        self._file_row(files, 2, "Script  (optional)", "Not needed when the folder has scenes.txt",
+                       self.script, self.pick_script, clear=True)
 
-        ttk.Label(frm, text="3. Script (optional)").grid(row=2, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.script, width=55).grid(row=2, column=1, **pad)
-        ttk.Button(frm, text="Browse…", command=self.pick_script).grid(row=2, column=2, **pad)
-        ttk.Label(frm, text="Not needed if the folder has scenes.txt from Flow Batch. "
-                            "No script at all = equal timing.",
-                  foreground="#666").grid(row=3, column=1, columnspan=2, sticky="w", padx=10)
+        # 2. Options
+        opts = self._card(body, "2", "Options")
+        checks = ttk.Frame(opts, style="Card.TFrame")
+        checks.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(checks, text="Slow zoom on images", variable=self.zoom).pack(side="left")
+        ttk.Checkbutton(checks, text="Subtitles on the video", variable=self.subs).pack(side="left", padx=(18, 0))
+        ttk.Checkbutton(checks, text="Only the first image of each prompt", variable=self.first_only,
+                        command=self.refresh_check).pack(side="left", padx=(18, 0))
+        border = ttk.Frame(opts, style="Card.TFrame")
+        border.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(border, text="Border around non-16:9 images", style="Card.TLabel").pack(side="left")
+        ttk.Combobox(border, textvariable=self.bg, values=["white", "black"], width=7,
+                     state="readonly").pack(side="left", padx=(8, 0))
+        self._file_row(opts, 2, "Background music", "Optional – quieter while you speak",
+                       self.music, self.pick_music, clear=True, top=6)
+        vol = ttk.Frame(opts, style="Card.TFrame")
+        vol.grid(row=3, column=1, sticky="w", pady=(2, 0))
+        ttk.Label(vol, text="Music volume", style="Muted.TLabel").pack(side="left")
+        ttk.Combobox(vol, textvariable=self.music_level, values=list(MUSIC_LEVELS), width=8,
+                     state="readonly").pack(side="left", padx=(8, 0))
 
-        ttk.Label(frm, text="Background music").grid(row=4, column=0, sticky="w", **pad)
-        ttk.Entry(frm, textvariable=self.music, width=55).grid(row=4, column=1, **pad)
-        mbox = ttk.Frame(frm)
-        mbox.grid(row=4, column=2, **pad)
-        ttk.Button(mbox, text="Browse…", command=self.pick_music).pack(side="left")
-        ttk.Button(mbox, text="✕", width=2, command=lambda: self.music.set("")).pack(side="left", padx=(4, 0))
-        mrow = ttk.Frame(frm)
-        mrow.grid(row=5, column=1, columnspan=2, sticky="w", padx=10)
-        ttk.Label(mrow, text="Optional, loops and fades out; quieter while the narrator speaks.  Volume:",
-                  foreground="#666").pack(side="left")
-        ttk.Combobox(mrow, textvariable=self.music_level, values=list(MUSIC_LEVELS), width=7,
-                     state="readonly").pack(side="left", padx=(4, 0))
+        # 3. Check
+        check = self._card(body, "3", "Check")
+        check.columnconfigure(0, weight=1, minsize=0)
+        check.columnconfigure(1, weight=0)
+        check.columnconfigure(2, minsize=0)
+        self.report = tk.Text(check, height=6, width=70, wrap="word", relief="flat", bg="#F8FAFD",
+                              fg=C_INK, font=(FONT, 10), padx=10, pady=8, cursor="arrow",
+                              highlightthickness=1, highlightbackground=C_LINE)
+        self.report.grid(row=0, column=0, sticky="we")
+        scroll = ttk.Scrollbar(check, orient="vertical", command=self.report.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.report.configure(yscrollcommand=scroll.set)
+        for tag, colour in (("ok", C_OK), ("bad", C_BAD), ("warn", C_WARN), ("muted", C_MUTED), ("ink", C_INK)):
+            self.report.tag_configure(tag, foreground=colour)
+        self.report.tag_configure("head", font=(FONT, 10, "bold"))
+        self.report.tag_configure("quote", foreground=C_MUTED, lmargin1=26, lmargin2=26)
 
-        opts = ttk.Frame(frm)
-        opts.grid(row=6, column=0, columnspan=3, sticky="w", **pad)
-        ttk.Checkbutton(opts, text="Only the first image of each prompt (001_…_1)", variable=self.first_only,
-                        command=self.refresh_count).pack(side="left")
-        ttk.Checkbutton(opts, text="Slow zoom on images", variable=self.zoom).pack(side="left", padx=(12, 0))
-        ttk.Checkbutton(opts, text="Subtitles on the video", variable=self.subs).pack(side="left", padx=(12, 0))
-        ttk.Label(opts, text="   Border:").pack(side="left")
-        ttk.Combobox(opts, textvariable=self.bg, values=["white", "black"], width=7, state="readonly").pack(side="left")
+        # Progress + buttons
+        foot = tk.Frame(body, bg=C_BG)
+        foot.pack(fill="x", pady=(4, 0))
+        self.bar = ttk.Progressbar(foot, maximum=1.0, style="Accent.Horizontal.TProgressbar")
+        self.bar.pack(fill="x")
+        tk.Label(foot, textvariable=self.status, bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w",
+                 justify="left", wraplength=720).pack(fill="x", pady=(6, 8))
+        btns = tk.Frame(foot, bg=C_BG)
+        btns.pack(fill="x")
+        self.go = ttk.Button(btns, text="▶  Make video", style="Accent.TButton", command=self.start)
+        self.go.pack(side="right")
+        self.open_btn = ttk.Button(btns, text="Open folder", command=self.open_folder, state="disabled")
+        self.open_btn.pack(side="right", padx=(0, 10))
 
-        self.count = ttk.Label(frm, text="")
-        self.count.grid(row=7, column=0, columnspan=3, sticky="w", **pad)
-
-        self.bar = ttk.Progressbar(frm, length=560, maximum=1.0)
-        self.bar.grid(row=8, column=0, columnspan=3, **pad)
-        ttk.Label(frm, textvariable=self.status, wraplength=560).grid(row=9, column=0, columnspan=3, sticky="w", **pad)
-
-        self.go = ttk.Button(frm, text="Make video", command=self.start)
-        self.go.grid(row=10, column=0, columnspan=3, pady=(6, 2))
-
+        self.refresh_check()
         if not find_tool("ffmpeg"):
-            self.status.set("FFmpeg is not installed – run  winget install Gyan.FFmpeg  once, then reopen this tool.")
+            self.status.set("FFmpeg is not installed – run Setup.bat once (or: winget install Gyan.FFmpeg), then reopen this tool.")
+
+    # ----- look -----
+
+    def _styles(self):
+        st = ttk.Style(self)
+        st.theme_use("clam")
+        st.configure(".", font=(FONT, 10), foreground=C_INK)
+        st.configure("Card.TFrame", background=C_CARD)
+        st.configure("Card.TLabel", background=C_CARD)
+        st.configure("Field.TLabel", background=C_CARD, font=(FONT, 10, "bold"))
+        st.configure("Muted.TLabel", background=C_CARD, foreground=C_MUTED, font=(FONT, 9))
+        st.configure("Title.TLabel", background=C_CARD, font=(FONT, 12, "bold"))
+        st.configure("Step.TLabel", background=C_ACCENT, foreground="white", font=(FONT, 9, "bold"),
+                     padding=(7, 1), anchor="center")
+        st.configure("TCheckbutton", background=C_CARD, padding=2)
+        st.map("TCheckbutton", background=[("active", C_CARD)])
+        st.configure("TEntry", padding=6, fieldbackground="white", bordercolor=C_LINE, lightcolor=C_LINE)
+        st.map("TEntry", bordercolor=[("focus", C_ACCENT)], lightcolor=[("focus", C_ACCENT)])
+        st.configure("TCombobox", padding=4, fieldbackground="white", bordercolor=C_LINE)
+        st.map("TCombobox", fieldbackground=[("readonly", "white")])
+        st.configure("TButton", padding=(12, 6), background="#EEF1F7", bordercolor=C_LINE,
+                     lightcolor="#EEF1F7", darkcolor="#EEF1F7")
+        st.map("TButton", background=[("active", "#E2E7F1"), ("disabled", "#F3F5FA")],
+               foreground=[("disabled", "#A0A7B4")])
+        st.configure("Accent.TButton", padding=(26, 10), font=(FONT, 11, "bold"), foreground="white",
+                     background=C_ACCENT, bordercolor=C_ACCENT, lightcolor=C_ACCENT, darkcolor=C_ACCENT)
+        st.map("Accent.TButton", background=[("disabled", "#9DB6EE"), ("active", C_ACCENT_DOWN)],
+               foreground=[("disabled", "white")])
+        st.configure("Accent.Horizontal.TProgressbar", thickness=10, background=C_ACCENT, troughcolor="#E3E7EF",
+                     bordercolor="#E3E7EF", lightcolor=C_ACCENT, darkcolor=C_ACCENT)
+
+    def _card(self, parent, step, title):
+        outer = tk.Frame(parent, bg=C_CARD, highlightthickness=1, highlightbackground=C_LINE)
+        outer.pack(fill="x", pady=(0, 10))
+        top = ttk.Frame(outer, style="Card.TFrame", padding=(16, 10, 16, 2))
+        top.pack(fill="x")
+        ttk.Label(top, text=step, style="Step.TLabel").pack(side="left")
+        ttk.Label(top, text=title, style="Title.TLabel").pack(side="left", padx=(10, 0))
+        inner = ttk.Frame(outer, style="Card.TFrame", padding=(16, 4, 16, 12))
+        inner.pack(fill="x")
+        # Same column widths in every card, so the boxes line up.
+        inner.columnconfigure(0, minsize=250)
+        inner.columnconfigure(1, weight=1)
+        inner.columnconfigure(2, minsize=150)
+        return inner
+
+    def _file_row(self, parent, row, label, hint, var, browse, clear=False, top=0):
+        r = row
+        names = ttk.Frame(parent, style="Card.TFrame")
+        names.grid(row=r, column=0, sticky="nw", pady=(top + 3, 3), padx=(0, 14))
+        ttk.Label(names, text=label, style="Field.TLabel").pack(anchor="w")
+        ttk.Label(names, text=hint, style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(parent, textvariable=var, width=46).grid(row=r, column=1, sticky="we", pady=(top + 3, 3))
+        btns = ttk.Frame(parent, style="Card.TFrame")
+        btns.grid(row=r, column=2, sticky="w", pady=(top + 3, 3), padx=(8, 0))
+        ttk.Button(btns, text="Browse…", command=browse).pack(side="left")
+        if clear:
+            ttk.Button(btns, text="✕", width=3, command=lambda: (var.set(""), self.refresh_check())).pack(side="left", padx=(4, 0))
+
+    # ----- the Check panel -----
+
+    def write_report(self, items):
+        """items: [(tag, text)] – tag ok / bad / warn / muted / quote / head."""
+        self.report.configure(state="normal")
+        self.report.delete("1.0", "end")
+        for tag, text in items:
+            self.report.insert("end", text + "\n", tag)
+        self.report.configure(state="disabled")
+
+    def add_report(self, items):
+        self.report.configure(state="normal")
+        for tag, text in items:
+            self.report.insert("end", text + "\n", tag)
+        self.report.configure(state="disabled")
+        self.report.see("end")
+
+    def check_items(self, plan):
+        n_img = sum(len(s) for s in plan["scenes"])
+        if not plan["script"]:
+            return [("ok", f"✓  {n_img} image(s)."),
+                    ("warn", "⚠  No script or scenes.txt – every image gets an equal share of the audio "
+                             "(no subtitles, no chapters).")]
+        src = ("scenes.txt in the folder" if plan["script"].name == "scenes.txt" and not self.script.get().strip()
+               else plan["script"].name)
+        items = [("ok", f"✓  {len(plan['scenes'])} scenes from {src}  ·  {n_img} image(s)"
+                        + (f"  ·  {len(plan['chapters'])} chapters" if plan["chapters"] else ""))]
+        if plan["missing"]:
+            items.append(("bad", f"✗  No image for {len(plan['missing'])} scene(s) – the previous image stays on screen:"))
+            for n in plan["missing"][:15]:
+                items.append(("quote", f"Scene {n}:  “{cut(plan['lines'][n - 1])}”"))
+            if len(plan["missing"]) > 15:
+                items.append(("quote", f"… and {len(plan['missing']) - 15} more"))
+        else:
+            items.append(("ok", "✓  Every scene has an image"))
+        empty = [i + 1 for i, line in enumerate(plan["lines"]) if not line.strip()]
+        if empty:
+            items.append(("warn", f"⚠  No narration written for scene(s) {', '.join(map(str, empty[:20]))}"))
+        if plan["extra"]:
+            items.append(("muted", f"•  {len(plan['extra'])} other image(s) don't belong to a scene and are left out"))
+        items.append(("muted", "•  Whether every narration line is in the audio is checked when you click Make video."))
+        return items
+
+    def refresh_check(self):
+        folder = self.folder.get().strip()
+        if not (folder and Path(folder).is_dir()):
+            self.write_report([("muted", "Pick the images folder – the scenes and images are checked here.")])
+            return
+        if not self.output and self.audio.get().strip():
+            self.status.set("Ready – click Make video.")
+        try:
+            self.write_report(self.check_items(plan_scenes(folder, self.first_only.get(), self.script.get().strip() or None)))
+        except Exception as e:
+            self.write_report([("bad", f"✗  {e}")])
+
+    # ----- pickers -----
 
     def pick_folder(self):
         d = filedialog.askdirectory(title="Folder with the images")
         if d:
             self.folder.set(d)
-            self.refresh_count()
+            self.refresh_check()
 
     def pick_audio(self):
         f = filedialog.askopenfilename(title="Narration audio", filetypes=AUDIO_TYPES)
         if f:
             self.audio.set(f)
+            self.refresh_check()
 
     def pick_music(self):
         f = filedialog.askopenfilename(title="Background music", filetypes=AUDIO_TYPES)
@@ -792,37 +945,19 @@ class App(tk.Tk):
             self.music.set(f)
 
     def pick_script(self):
-        f = filedialog.askopenfilename(title="Narration script (one line per image)", filetypes=SCRIPT_TYPES)
+        f = filedialog.askopenfilename(title="Narration script", filetypes=SCRIPT_TYPES)
         if f:
             self.script.set(f)
-            self.refresh_count()
+            self.refresh_check()
 
-    def describe(self, plan):
-        n_img = sum(len(s) for s in plan["scenes"])
-        if not plan["script"]:
-            return f"{n_img} image(s), no script – each image gets an equal share of the audio."
-        src = "scenes.txt in the folder" if plan["script"].name == "scenes.txt" and not self.script.get() else plan["script"].name
-        text = f"{len(plan['scenes'])} scenes (from {src}), {n_img} image(s)."
-        if plan["chapters"]:
-            text += f" {len(plan['chapters'])} chapter title(s)."
-        if plan["missing"]:
-            text += f"  ✗ No image for scene(s) {', '.join(map(str, plan['missing']))}."
-        else:
-            text += "  ✓ Every scene has an image."
-        if plan["extra"]:
-            text += f"  {len(plan['extra'])} other image(s) don't belong to a scene and are left out."
-        return text
+    def open_folder(self):
+        if self.output:
+            os.startfile(self.output.parent)
 
-    def refresh_count(self):
-        if not (self.folder.get() and Path(self.folder.get()).is_dir()):
-            return
-        try:
-            self.count.config(text=self.describe(plan_scenes(self.folder.get(), self.first_only.get(), self.script.get().strip() or None)))
-        except Exception as e:
-            self.count.config(text=f"✗ {e}")
+    # ----- run -----
 
     def start(self):
-        folder, audio, script = self.folder.get(), self.audio.get(), self.script.get().strip()
+        folder, audio, script = self.folder.get().strip(), self.audio.get().strip(), self.script.get().strip()
         music = self.music.get().strip()
         if not folder or not Path(folder).is_dir():
             return messagebox.showwarning("Make Video", "Pick the images folder first.")
@@ -835,22 +970,27 @@ class App(tk.Tk):
         try:
             plan = plan_scenes(folder, self.first_only.get(), script or None)
         except Exception as e:
+            self.write_report([("bad", f"✗  {e}")])
             return messagebox.showerror("Make Video", str(e))
+        self.write_report(self.check_items(plan))
         if not any(plan["scenes"]):
             return messagebox.showwarning("Make Video", "No images (.png/.jpg/.webp) in that folder.")
         if plan["missing"]:
-            gaps = ", ".join(map(str, plan["missing"]))
+            listed = "\n".join(f"  Scene {n}: “{cut(plan['lines'][n - 1], 70)}”" for n in plan["missing"][:12])
+            more = f"\n  … and {len(plan['missing']) - 12} more" if len(plan["missing"]) > 12 else ""
             if not messagebox.askyesno(
                 "Make Video",
-                f"Scene(s) {gaps} have no image (failed or deleted).\n\n"
-                "Make the video anyway? The previous image stays on screen during those scenes.\n\n"
+                f"These scenes have no image (failed or deleted):\n\n{listed}{more}\n\n"
+                "Make the video anyway? The previous image stays on screen while this narration is spoken.\n\n"
                 "Or click No, use \"Retry failed\" in Flow Batch, and come back.",
+                icon="warning",
             ):
                 return
         output = Path(folder) / f"{Path(folder).name}.mp4"
         n_images = sum(len(s) for s in plan["scenes"])
 
         self.go.config(state="disabled")
+        self.open_btn.config(state="disabled")
         self.bar["value"] = 0
 
         def progress(frac):
@@ -859,10 +999,21 @@ class App(tk.Tk):
         def status(text):
             self.after(0, lambda: self.status.set(text))
 
-        def confirm(msg):
-            # Called from the worker thread: ask in the window and wait for the answer.
+        def confirm(msg, scenes):
+            # Called from the worker thread: show the missing narration in the Check
+            # panel, ask in the window and wait for the answer.
             done, answer = threading.Event(), []
-            self.after(0, lambda: (answer.append(messagebox.askyesno("Make Video", msg, icon="warning")), done.set()))
+
+            def ask():
+                items = [("bad", f"✗  Narration not in the audio for {len(scenes)} scene(s) (not recorded, or cut out):")]
+                items += [("quote", f"Scene {n}:  “{cut(text)}”") for n, text in scenes[:15]]
+                if len(scenes) > 15:
+                    items.append(("quote", f"… and {len(scenes) - 15} more"))
+                self.add_report(items)
+                answer.append(messagebox.askyesno("Make Video", msg, icon="warning"))
+                done.set()
+
+            self.after(0, ask)
             done.wait()
             return answer[0]
 
@@ -874,30 +1025,40 @@ class App(tk.Tk):
                     burn_subs=self.subs.get(), confirm=confirm,
                 )
                 mode = "matched to the narration" if plan["script"] else "equal timing"
+                items = [("ok", f"✓  Done:  {output.name}  ·  {int(total // 60)}:{int(total % 60):02d}  ·  "
+                                f"{n_images} images, {mode}")]
+                if plan["script"]:
+                    items.append(("muted", f"•  {note}"))
                 if self.subs.get() and not plan["script"]:
-                    note += " No subtitles on the video – they need a script (scenes.txt)."
-                files = [f"{output.stem}_timings.csv"] + extra
-                msg = (f"Done! {output}\n{n_images} images, {total:.0f} s, {mode} "
-                       f"(shortest {min(durations):.1f} s, longest {max(durations):.1f} s). {note}\n"
-                       f"Also saved: {', '.join(files)}")
-                self.after(0, lambda: self.finish(msg, output))
+                    items.append(("warn", "⚠  No subtitles on the video – they need a script (scenes.txt)."))
+                items.append(("muted", "•  Also saved: " + ", ".join([f"{output.stem}_timings.csv"] + extra)))
+                self.after(0, lambda: self.finish(items, output))
             except Exception as e:  # show any failure in the window
                 err = str(e)
-                self.after(0, lambda: self.finish(err, None))
+                self.after(0, lambda: self.finish([("bad", f"✗  {err}")], None))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def finish(self, msg, output):
+    def finish(self, items, output):
         self.go.config(state="normal")
-        self.status.set(msg)
+        self.add_report(items)
         if output:
+            self.output = output
             self.bar["value"] = 1.0
-            if messagebox.askyesno("Make Video", f"{msg}\n\nOpen the folder?"):
-                os.startfile(output.parent)
+            self.status.set(f"Finished – {output}")
+            self.open_btn.config(state="normal")
         else:
-            messagebox.showerror("Make Video", msg)
+            self.bar["value"] = 0
+            self.status.set("Stopped.")
+            messagebox.showerror("Make Video", items[0][1].lstrip("✗ "))
 
 
 if __name__ == "__main__":
     sys.dont_write_bytecode = True
+    if os.name == "nt":
+        try:  # sharp text on high-DPI screens
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
     App().mainloop()

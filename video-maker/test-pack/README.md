@@ -25,9 +25,9 @@ straight to the video step.
 2. **Images folder** → your copy of `test-pack`.
 3. **Narration audio** → `narration.mp3` from the copy.
 4. **Script** → leave empty (it reads `scenes.txt` from the folder).
-5. Check the line under the options says:
-   *"9 scenes (from scenes.txt in the folder), 9 image(s). 3 chapter title(s).
-   ✓ Every scene has an image."*
+5. The **Check** panel should say:
+   *"✓ 9 scenes from scenes.txt in the folder · 9 image(s) · 3 chapters"* and
+   *"✓ Every scene has an image"*.
 6. Optional: **Background music** → `music.mp3` (volume *Quiet*), and tick
    **Slow zoom on images** and **Subtitles on the video**.
 7. Click **Make video** (about 1–2 minutes).
