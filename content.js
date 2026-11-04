@@ -234,9 +234,14 @@
   }
 
   // What is actually typed into Flow: the style line + the scene's prompt.
+  // Make Video effect tags ("[rain]", "[rock]" …) stay in scenes.txt but are never sent to Flow.
+  const EFFECT_TAGS = /\[(zoom-in|zoom-out|pan-left|pan-right|pan-up|pan-down|rock|shake|still|rain|snow)\]/gi;
+  const withoutTags = (text) => text.replace(EFFECT_TAGS, ' ').replace(/\s+/g, ' ').trim();
+
   function fullPrompt(p) {
     const style = (state.settings.style || '').trim().replace(/[\s,.;:]+$/, '');
-    return style ? `${style}, ${p.text}` : p.text;
+    const text = withoutTags(p.text);
+    return style ? `${style}, ${text}` : text;
   }
 
   // ---------- page automation ----------
@@ -846,7 +851,7 @@
 
   function slug(text) {
     return (
-      text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'prompt'
+      withoutTags(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'prompt'
     );
   }
 

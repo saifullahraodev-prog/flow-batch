@@ -36,6 +36,15 @@ WHISPER_MODEL = "small"   # ~480 MB, downloaded once; multilingual
 LEAD_IN = 0.15            # show the image this many seconds before its first word
 MIN_SCENE = 0.5           # never show an image for less than this
 ZOOM = 0.08               # slow zoom: 8 % in (or out) over each image
+PAN = 0.10                # pans: the picture is enlarged 10 % and slides across
+FADE = 0.4                # crossfade between pictures, seconds
+ROCK_DEGREES, ROCK_SECONDS = 0.8, 5.0   # [rock]: gentle tilt, like a ship at sea
+# Motion per scene, from a tag in the scene's prompt: "… storm at sea [rock] [rain]".
+MOTION_TAGS = ("zoom-in", "zoom-out", "pan-left", "pan-right", "pan-up", "pan-down", "rock", "shake", "still")
+WEATHER_TAGS = ("rain", "snow")
+TAG_RE = re.compile(r"\[(" + "|".join(MOTION_TAGS + WEATHER_TAGS) + r")\]", re.I)
+AUTO_MOTIONS = ("zoom-in", "pan-right", "zoom-out", "pan-left", "zoom-in", "pan-up", "zoom-out", "pan-down")
+MOTION_MODES = {"Auto – zoom & pan": "auto", "Zoom only": "zoom", "Off – still pictures": "off"}
 MUSIC_LEVELS = {"Quiet": 0.10, "Medium": 0.18, "Loud": 0.28}
 MISSING_BELOW = 0.3       # a scene with fewer of its words heard counts as "not in the audio"
 SUB_MAX_CHARS = 42        # one subtitle line
@@ -134,20 +143,24 @@ def parse_scene_file(path):
     Scene lines are "narration | image prompt" (or just narration). Or the
     prompt file's own format: a "(narration)" line in brackets, with the image
     prompt on the line below it. A line "## Title" starts a chapter at the next
-    scene; other "#" lines are notes.
-    Returns (lines, chapters) with chapters = {scene_index: title}.
+    scene; other "#" lines are notes. Tags like [rain] or [rock] anywhere in a
+    scene choose its motion / weather effect (see MOTION_TAGS, WEATHER_TAGS).
+    Returns (lines, chapters, tags): chapters = {scene_index: title},
+    tags = one set per scene.
     """
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
     rows = [r.strip() for r in text.splitlines()]
     bracketed = any(re.match(r"^\(.*\)$", r) for r in rows)
-    lines, chapters, pending, said = [], {}, None, []
+    lines, chapters, tags, pending, said, found = [], {}, [], None, [], set()
 
     def add(narration):
-        nonlocal pending
+        nonlocal pending, found
         if pending:
             chapters[len(lines)] = pending
             pending = None
         lines.append(narration)
+        tags.append(found)
+        found = set()
 
     for line in rows:
         if not line:
@@ -157,6 +170,10 @@ def parse_scene_file(path):
             pending = m.group(1).strip()
             continue
         if line.startswith("#"):
+            continue
+        found |= {t.lower() for t in TAG_RE.findall(line)}
+        line = " ".join(TAG_RE.sub(" ", line).split())
+        if not line:  # a line with only tags: they belong to the next scene
             continue
         if bracketed:
             n = re.match(r"^\((.*)\)$", line)
@@ -169,7 +186,7 @@ def parse_scene_file(path):
         add(line.split("|", 1)[0].strip() if "|" in line else line)
     if said:
         add(" ".join(said))
-    return lines, chapters
+    return lines, chapters, tags
 
 
 def read_script(path):
@@ -199,8 +216,9 @@ def plan_scenes(folder, first_per_prompt, script=None):
     images = pick_images(folder, first_per_prompt)
     path = find_script(folder, script)
     if not path:
-        return {"script": None, "lines": None, "chapters": {}, "scenes": [[p] for p in images], "missing": [], "extra": []}
-    lines, chapters = parse_scene_file(path)
+        return {"script": None, "lines": None, "chapters": {}, "tags": [set() for _ in images],
+                "scenes": [[p] for p in images], "missing": [], "extra": []}
+    lines, chapters, tags = parse_scene_file(path)
     numbered = [p for p in images if scene_number(p)]
     if numbered:
         # Flow Batch file names start with the scene number: 001_…, 002_… – match by number,
@@ -220,7 +238,8 @@ def plan_scenes(folder, first_per_prompt, script=None):
     missing = [i + 1 for i, s in enumerate(scenes) if not s]
     if len(missing) == len(scenes):
         raise RuntimeError("None of the scenes has an image – is this the right folder for this script?")
-    return {"script": path, "lines": lines, "chapters": chapters, "scenes": scenes, "missing": missing, "extra": extra}
+    return {"script": path, "lines": lines, "chapters": chapters, "tags": tags, "scenes": scenes,
+            "missing": missing, "extra": extra}
 
 
 # ---------- narration matching ----------
@@ -515,16 +534,148 @@ def write_youtube_text(path, title, chapters, total):
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# ---------- motion ----------
+
+def pick_motion(mode, tags, i):
+    """The motion of shot i: its tag if it has one, else from the Motion setting."""
+    tagged = next((t for t in MOTION_TAGS if t in tags), None)
+    if tagged:
+        return tagged
+    if mode == "auto":
+        return AUTO_MOTIONS[i % len(AUTO_MOTIONS)]
+    if mode == "zoom":
+        return "zoom-in" if i % 2 == 0 else "zoom-out"
+    return "still"
+
+
+def motion_filter(motion, n):
+    """FFmpeg filter that moves one 1920x1080 picture over n frames.
+
+    Returns (filter, looped): zoom/pan use zoompan on a single input frame (no
+    loop); rock/shake/still need the picture as a looped input.
+    """
+    if motion in ("zoom-in", "zoom-out") or motion.startswith("pan-"):
+        p = f"on/{max(1, n - 1)}"  # 0 → 1 over the shot
+        mid_x, mid_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+        z, x, y = f"{1 + PAN}", mid_x, mid_y
+        if motion == "zoom-in":
+            z = f"1+{ZOOM}*{p}"
+        elif motion == "zoom-out":
+            z = f"{1 + ZOOM}-{ZOOM}*{p}"
+        elif motion == "pan-right":
+            x = f"(iw-iw/zoom)*{p}"
+        elif motion == "pan-left":
+            x = f"(iw-iw/zoom)*(1-{p})"
+        elif motion == "pan-down":
+            y = f"(ih-ih/zoom)*{p}"
+        elif motion == "pan-up":
+            y = f"(ih-ih/zoom)*(1-{p})"
+        # Enlarged first so the slow movement stays smooth (no 1-pixel steps).
+        return (f"scale={WIDTH * 2}:{HEIGHT * 2},zoompan=z='{z}':x='{x}':y='{y}'"
+                f":d={n}:s={WIDTH}x{HEIGHT}:fps={FPS}", False)
+    if motion == "rock":
+        # Slight tilt back and forth plus a small rise and fall, picture enlarged 8 %.
+        w, h = round(WIDTH * 1.08 / 2) * 2, round(HEIGHT * 1.08 / 2) * 2
+        a = f"{ROCK_DEGREES}*PI/180*sin(2*PI*t/{ROCK_SECONDS})"
+        return (f"scale={w}:{h},rotate=a='{a}':ow={WIDTH}:oh={HEIGHT + 24},"
+                f"crop={WIDTH}:{HEIGHT}:0:'12+10*sin(2*PI*t/{ROCK_SECONDS}+1.2)'", True)
+    if motion == "shake":
+        # Uneven camera shake (storms, explosions), picture enlarged 5 %.
+        w, h = round(WIDTH * 1.05 / 2) * 2, round(HEIGHT * 1.05 / 2) * 2
+        mx, my = (w - WIDTH) // 2, (h - HEIGHT) // 2
+        return (f"scale={w}:{h},crop={WIDTH}:{HEIGHT}:'{mx}+{mx * 0.6:.0f}*sin(t*21)+{mx * 0.3:.0f}*sin(t*47)'"
+                f":'{my}+{my * 0.6:.0f}*sin(t*27)+{my * 0.3:.0f}*sin(t*59)'", True)
+    return ("null", True)
+
+
+def make_weather_layer(ffmpeg, kind, path):
+    """A see-through layer of rain streaks or snowflakes, two identical 1080-line
+    halves stacked so it can scroll down endlessly. Written as PNG with alpha."""
+    import numpy as np
+
+    rng = np.random.default_rng(7 if kind == "rain" else 11)
+    w, h = WIDTH + 80, HEIGHT
+    rgba = np.zeros((h, w, 4), np.uint8)
+    if kind == "rain":
+        for _ in range(900):
+            x0, y0 = rng.uniform(0, w), rng.uniform(0, h)
+            length = rng.uniform(28, 60)
+            k = np.linspace(0, 1, int(length))
+            xs = ((x0 + 0.18 * length * k) % w).astype(int)
+            ys = ((y0 + length * k) % h).astype(int)
+            alpha = int(rng.uniform(110, 190))
+            for dx in (0, 1):  # 2 px wide, grey-blue: visible on light and dark pictures
+                xx = (xs + dx) % w
+                rgba[ys, xx, :3] = (178, 192, 212)
+                rgba[ys, xx, 3] = np.maximum(rgba[ys, xx, 3], alpha)
+    else:
+        yy, xx = np.mgrid[-4:5, -4:5]
+        for _ in range(650):
+            cx, cy, r = rng.uniform(0, w), rng.uniform(0, h), rng.uniform(1.4, 3.6)
+            soft = np.clip(1.4 - np.hypot(xx, yy) / r, 0, 1)
+            xs = ((cx + xx) % w).astype(int)
+            ys = ((cy + yy) % h).astype(int)
+            a = (soft * rng.uniform(150, 230)).astype(np.uint8)
+            rgba[ys, xs, :3] = 255
+            rgba[ys, xs, 3] = np.maximum(rgba[ys, xs, 3], a)
+    layer = np.vstack([rgba, rgba])
+    r = subprocess.run(
+        [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba",
+         "-s", f"{w}x{2 * h}", "-i", "-", "-frames:v", "1", str(path)],
+        input=layer.tobytes(), capture_output=True, creationflags=NO_WINDOW,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"Could not make the {kind} layer:\n{r.stderr.decode(errors='replace')[-600:]}")
+
+
+def render_clip(ffmpeg, frame, n, motion, weather, prev_last, out):
+    """One shot: the moving picture, optional rain/snow on top, optional
+    crossfade from the previous picture's last frame. Exactly n frames."""
+    vf, looped = motion_filter(motion, n)
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+    cmd += (["-loop", "1", "-framerate", str(FPS)] if looped else []) + ["-i", str(frame)]
+    if weather and weather[0] == "rain":
+        vf += ",eq=brightness=-0.06:saturation=0.85"  # a little darker: rainy mood
+    graph = f"[0:v]{vf},setsar=1,format=yuva420p[m]"
+    k = 1
+    if weather:
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-i", str(weather[1])]
+        speed = 1500 if weather[0] == "rain" else 70
+        sway = "-40" if weather[0] == "rain" else "-40+36*sin(t*0.7)"
+        graph += f";[m][{k}:v]overlay=x='{sway}':y='-{HEIGHT}+mod(t*{speed},{HEIGHT})'[m]"
+        k += 1
+    if prev_last:
+        fade = min(FADE, 0.5 * n / FPS)
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-i", str(prev_last)]
+        graph += f";[m]fade=t=in:st=0:d={fade:.3f}:alpha=1[m];[{k}:v][m]overlay=0:0[m]"
+    graph += ";[m]format=yuv420p[v]"
+    cmd += ["-filter_complex", graph, "-map", "[v]", "-frames:v", str(n), "-r", str(FPS),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-an", str(out)]
+    run_ffmpeg(cmd)
+
+
+def last_frame(ffmpeg, clip, out):
+    run_ffmpeg([ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-sseof", "-0.5", "-i", str(clip),
+                "-update", "1", "-q:v", "1", str(out)])
+
+
 # ---------- build ----------
 
 def build_video(plan, audio, output, background, on_progress, on_status=lambda s: None,
-                zoom=False, music=None, music_level="Quiet", burn_subs=False, confirm=lambda msg, scenes: True):
+                zoom=False, music=None, music_level="Quiet", burn_subs=False, confirm=lambda msg, scenes: True,
+                motion="off", crossfade=False):
     """Make the MP4 from plan_scenes().
+
+    motion: "auto" (zoom and pan, varied), "zoom" (slow zoom in/out) or "off";
+    tags in the scene file ([rock], [rain] …) override it per scene.
+    crossfade: blend each picture into the next (FADE seconds).
 
     confirm(message, [(scene_number, narration), …]) -> bool is asked when some
     scenes' narration is not in the audio; False stops without making a video.
     Returns (total_seconds, durations, note, extra_files).
     """
+    if zoom and motion == "off":
+        motion = "zoom"
     ffmpeg, ffprobe = find_tool("ffmpeg"), find_tool("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg is not installed.\n\nInstall it once by running this in a terminal:\n\nwinget install Gyan.FFmpeg\n\nthen open this tool again.")
@@ -566,24 +717,25 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
         starts = [total * i / len(scenes) for i in range(len(scenes))]
     scene_len = [b - a for a, b in zip(starts, starts[1:] + [total])]
 
-    # Turn scenes into shots (image, start, seconds). A scene without an image keeps
-    # the previous image on screen; several images in one scene share its time.
+    # Turn scenes into shots (image, start, seconds, tags). A scene without an image
+    # keeps the previous image on screen; several images in one scene share its time.
+    scene_tags = plan.get("tags") or [set() for _ in scenes]
     shots, carry = [], 0.0
-    for imgs, s, d in zip(scenes, starts, scene_len):
+    for imgs, s, d, tags in zip(scenes, starts, scene_len, scene_tags):
         if d <= 1e-6:  # narration not in the audio: the scene is left out
             continue
         if not imgs:
             if shots:
-                img, s0, d0 = shots[-1]
-                shots[-1] = (img, s0, d0 + d)
+                img, s0, d0, t0 = shots[-1]
+                shots[-1] = (img, s0, d0 + d, t0)
             else:
                 carry += d  # missing first scene(s): the first image starts at 0
             continue
         s, d = s - carry, d + carry
         carry = 0.0
         for k, img in enumerate(imgs):
-            shots.append((img, s + d * k / len(imgs), d / len(imgs)))
-    durations = [d for _, _, d in shots]
+            shots.append((img, s + d * k / len(imgs), d / len(imgs), tags))
+    durations = [d for _, _, d, _ in shots]
 
     # Timing sheet next to the video, to check or share.
     chapter_at = plan.get("chapters") or {}
@@ -618,7 +770,7 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
             f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:color={background},setsar=1"
         )
         frames = []
-        for i, (img, _, _) in enumerate(shots):
+        for i, (img, _, _, _) in enumerate(shots):
             frame = tmp / f"{i:05d}.png"
             r = subprocess.run(
                 [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(img), "-vf", fit, "-frames:v", "1", str(frame)],
@@ -632,22 +784,24 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
         # 2. The picture track (no sound yet).
         base = p_listen + p_img
         video_only = tmp / "video.mp4"
-        if zoom:
-            # Slow zoom: one short clip per image (alternating in/out), frame counts
-            # taken from the running total so the cuts stay exactly on time.
-            on_status("Making the video (slow zoom)…")
-            clips, done = [], 0
-            for i, ((_, s, d), frame) in enumerate(zip(shots, frames)):
+        if motion != "off" or crossfade or any(tags for _, _, _, tags in shots):
+            # Motion: one short clip per image, frame counts taken from the running
+            # total so the cuts stay exactly on time; then the clips are joined.
+            on_status("Making the video (motion)…")
+            clips, done, layers, prev_last = [], 0, {}, None
+            for i, ((_, s, d, tags), frame) in enumerate(zip(shots, frames)):
                 n = max(1, round((s + d) * FPS) - done)
                 done += n
-                z = f"1+{ZOOM}*on/{n}" if i % 2 == 0 else f"{1 + ZOOM}-{ZOOM}*on/{n}"
+                kind = next((t for t in WEATHER_TAGS if t in tags), None)
+                if kind and kind not in layers:
+                    layers[kind] = tmp / f"{kind}.png"
+                    make_weather_layer(ffmpeg, kind, layers[kind])
                 clip = tmp / f"clip{i:05d}.mp4"
-                run_ffmpeg([
-                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", str(frame),
-                    "-vf", (f"scale={WIDTH * 2}:{HEIGHT * 2},zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                            f":d={n}:s={WIDTH}x{HEIGHT}:fps={FPS},format=yuv420p"),
-                    "-frames:v", str(n), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-an", str(clip),
-                ])
+                render_clip(ffmpeg, frame, n, pick_motion(motion, tags, i), (kind, layers[kind]) if kind else None,
+                            prev_last if crossfade else None, clip)
+                if crossfade:
+                    prev_last = tmp / f"last{i:05d}.png"
+                    last_frame(ffmpeg, clip, prev_last)
                 clips.append(clip)
                 on_progress(base + p_video * (i + 1) / len(shots))
             clip_list = tmp / "clips.txt"
@@ -732,7 +886,8 @@ class App(tk.Tk):
         self.music = tk.StringVar()
         self.music_level = tk.StringVar(value="Quiet")
         self.first_only = tk.BooleanVar(value=True)
-        self.zoom = tk.BooleanVar(value=False)
+        self.motion = tk.StringVar(value=next(iter(MOTION_MODES)))
+        self.crossfade = tk.BooleanVar(value=True)
         self.subs = tk.BooleanVar(value=False)
         self.bg = tk.StringVar(value="white")
         self.status = tk.StringVar(value="Pick the images folder and the narration audio.")
@@ -760,15 +915,21 @@ class App(tk.Tk):
         opts = self._card(body, "2", "Options")
         checks = ttk.Frame(opts, style="Card.TFrame")
         checks.grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(checks, text="Slow zoom on images", variable=self.zoom).pack(side="left")
+        ttk.Label(checks, text="Motion", style="Card.TLabel").pack(side="left")
+        ttk.Combobox(checks, textvariable=self.motion, values=list(MOTION_MODES), width=20,
+                     state="readonly").pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(checks, text="Crossfade", variable=self.crossfade).pack(side="left", padx=(18, 0))
         ttk.Checkbutton(checks, text="Subtitles on the video", variable=self.subs).pack(side="left", padx=(18, 0))
-        ttk.Checkbutton(checks, text="Only the first image of each prompt", variable=self.first_only,
-                        command=self.refresh_check).pack(side="left", padx=(18, 0))
         border = ttk.Frame(opts, style="Card.TFrame")
         border.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Label(border, text="Border around non-16:9 images", style="Card.TLabel").pack(side="left")
+        ttk.Checkbutton(border, text="Only the first image of each prompt", variable=self.first_only,
+                        command=self.refresh_check).pack(side="left")
+        ttk.Label(border, text="Border around non-16:9 images", style="Card.TLabel").pack(side="left", padx=(18, 0))
         ttk.Combobox(border, textvariable=self.bg, values=["white", "black"], width=7,
                      state="readonly").pack(side="left", padx=(8, 0))
+        ttk.Label(opts, text="Per scene, add a tag to its prompt: [rock] [shake] [rain] [snow] [still] "
+                             "[zoom-in] [zoom-out] [pan-left] [pan-right] [pan-up] [pan-down]",
+                  style="Muted.TLabel").grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self._file_row(opts, 2, "Background music", "Optional – quieter while you speak",
                        self.music, self.pick_music, clear=True, top=6)
         vol = ttk.Frame(opts, style="Card.TFrame")
@@ -910,6 +1071,13 @@ class App(tk.Tk):
             items.append(("warn", f"⚠  No narration written for scene(s) {', '.join(map(str, empty[:20]))}"))
         if plan["extra"]:
             items.append(("muted", f"•  {len(plan['extra'])} other image(s) don't belong to a scene and are left out"))
+        tagged = {}
+        for i, tags in enumerate(plan.get("tags") or []):
+            for t in sorted(tags):
+                tagged.setdefault(t, []).append(str(i + 1))
+        if tagged:
+            items.append(("ok", "✓  Scene effects: " + "  ·  ".join(
+                f"[{t}] scene {', '.join(n[:8])}{'…' if len(n) > 8 else ''}" for t, n in tagged.items())))
         items.append(("muted", "•  Whether every narration line is in the audio is checked when you click Make video."))
         return items
 
@@ -1021,7 +1189,8 @@ class App(tk.Tk):
             try:
                 total, durations, note, extra = build_video(
                     plan, audio, output, self.bg.get(), progress, status,
-                    zoom=self.zoom.get(), music=music or None, music_level=self.music_level.get(),
+                    motion=MOTION_MODES.get(self.motion.get(), "off"), crossfade=self.crossfade.get(),
+                    music=music or None, music_level=self.music_level.get(),
                     burn_subs=self.subs.get(), confirm=confirm,
                 )
                 mode = "matched to the narration" if plan["script"] else "equal timing"

@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.6.0** (shown in the panel title).
+Current version: **1.7.0** (shown in the panel title).
 
 ---
 
@@ -297,8 +297,11 @@ in order**, as **one** audio file (`.mp3`, `.wav`, `.m4a`…).
 5. *(Optional)* **Background music** → a music file, and its volume
    (Quiet / Medium / Loud). It loops if shorter than the video, fades out at
    the end, and automatically gets quieter while the narrator speaks.
-6. *(Optional)* tick **Slow zoom on images** – each picture slowly zooms in or
-   out (alternating), which keeps still images feeling alive.
+6. **Motion** – *Auto – zoom & pan* (default) moves every picture: slow zoom
+   in, pan right, zoom out, pan left … varied so it never feels repetitive.
+   *Zoom only* = just slow zoom; *Off* = still pictures. **Crossfade** (on by
+   default) blends each picture into the next. For single scenes you can choose
+   an effect with a tag – see [Motion and effect tags](#motion-and-effect-tags).
 7. *(Optional)* tick **Subtitles on the video** – the narration is written
    along the bottom of the picture in small white letters with a thin black
    outline, readable on light and dark images (needs `scenes.txt` or a script).
@@ -342,6 +345,35 @@ stickman crew loading containers with a crane at dawn
   the image prompt. Together they are one scene.
 - Several bracket lines in a row are joined into one narration.
 - Empty lines between scenes are fine.
+
+### Motion and effect tags
+
+Add a tag to a scene's **prompt** to give that scene a special movement or
+weather in Make Video. Tags are **never sent to Flow** and don't appear in the
+file names – they stay in `scenes.txt` for Make Video.
+
+```
+(The waves grow taller, but the ship holds steady.)
+small cargo ship riding huge waves in a storm [rock] [rain]
+```
+or `… | small cargo ship riding huge waves [rock] [rain]`
+
+| Tag | Effect |
+|---|---|
+| `[rock]` | The picture tilts gently back and forth and rises and falls – a ship at sea |
+| `[shake]` | Uneven camera shake – storms, explosions, crashes |
+| `[rain]` | Rain falls over the picture, which gets a little darker |
+| `[snow]` | Snow drifts down over the picture |
+| `[still]` | No movement for this scene |
+| `[zoom-in]` `[zoom-out]` | Slow zoom in / out |
+| `[pan-left]` `[pan-right]` `[pan-up]` `[pan-down]` | The camera slides across the picture |
+
+- One movement (`rock`, `shake`, `still`, zoom or pan) plus one weather
+  (`rain` / `snow`) per scene. Scenes without a tag follow the **Motion**
+  setting.
+- Tags work in every format: `(narration)` + prompt files, `narration | prompt`
+  lines, and the **Picture** box in Scene Builder.
+- The **Check** panel lists which scenes have which effect.
 
 **B. One line per scene, `|` in between:**
 
@@ -490,7 +522,8 @@ the progress bar with **Make video** and **Open folder** at the bottom.
 | Script (optional) | Only needed if the folder has no `scenes.txt`. A `.txt` with one narration line per scene, scene-file lines, or your `(narration)` + prompt file. **✕** clears it |
 | Only the first image of each prompt | On: one image per scene (`_1`, or `_2` if `_1` was deleted). Off: all images of a scene share its time |
 | Background music (optional) | A music file and its volume (Quiet / Medium / Loud). Loops, fades out over the last 3 s, and dips about 8 dB whenever the narrator speaks. **✕** clears it |
-| Slow zoom on images | Each image slowly zooms in or out by 8 % (alternating). Takes longer to build |
+| Motion | *Auto – zoom & pan*: every picture moves – slow zoom in/out (8 %) and pans (picture enlarged 10 % and slid across), in a varied order. *Zoom only*: zoom in/out alternating. *Off*: still pictures. Tags in the scene file override it per scene |
+| Crossfade | Each picture blends into the next over 0.4 s (the new picture still starts exactly on its line) |
 | Subtitles on the video | Burns the subtitles into the picture: small white Arial with a thin black outline, near the bottom. Always visible – also on Shorts, embeds and phones with captions off. The `.srt` is still written. Needs a script / `scenes.txt`. Adds a little build time (the video is encoded once more) |
 | Border | White or black bars around images that are not 16:9 |
 | Check panel | Green ✓ / red ✗ list: number of scenes, images and chapters; every scene **without an image** with its narration; scenes with no narration written. After you click **Make video** and the audio is heard, every scene whose **narration is not in the audio** is added here too, with its text. At the end: the result and the files saved |
@@ -550,7 +583,7 @@ exactly what a Flow Batch run leaves behind, plus extras to practise with:
 
 **Quick test:** copy `test-pack` to your Desktop → **Make Video.bat** →
 *Images folder*: the copy, *Narration*: its `narration.mp3`, *Script*: empty,
-optionally *Music*: `music.mp3` + *Slow zoom* → **Make video**. The Check
+optionally *Music*: `music.mp3` → **Make video**. The Check
 panel should say *"9 scenes from scenes.txt … 3 chapters"* and *"✓ Every scene has an image"*.
 
 You should get the video (cards appearing at about 0:00, 0:07, 0:12, 0:18,
@@ -591,8 +624,10 @@ Builder practice with `script.txt` – are in the
 ### Speed
 
 A 30-second video takes about a minute; a 10-minute video a few minutes
-(most of the time is spent listening to the narration). **Slow zoom** adds
-time, since every frame is drawn separately. **Subtitles on the video** adds a
+(most of the time is spent listening to the narration) with *Motion: Off*.
+**Motion** and **Crossfade** draw every frame separately: about 1.5× the
+video's length on a normal PC (a 10-minute video ≈ 15 minutes); `[rock]` is the
+slowest effect. **Subtitles on the video** adds a
 little, since the finished picture is encoded once more.
 
 ---
@@ -640,9 +675,12 @@ ends.
 5. **Subtitles & chapters** – script words get the spoken times (missed words
    interpolated) → `.srt`; chapter starts from `##` lines or one per minute →
    `_youtube.txt`.
-6. **Picture track** – still images joined with their durations, or (slow zoom)
-   one zoompan clip per image with frame counts from the running total so cuts
-   stay exact, then joined.
+6. **Picture track** – still images joined with their durations, or (motion /
+   crossfade / tags) one clip per image with frame counts from the running total
+   so cuts stay exact: `zoompan` for zoom and pans, `rotate` + `crop` for rock,
+   a moving `crop` for shake, a scrolling see-through rain/snow layer (made with
+   numpy) on top, and a `fade` from the previous picture's last frame; then the
+   clips are joined.
 7. **Sound** (and burned-in subtitles, if ticked: FFmpeg's `subtitles` filter
    with a fixed small white style, reading a copy of the `.srt` from the temp
    folder) – the narration; with music, the music is looped, faded out and
@@ -693,11 +731,13 @@ ends.
 | `align()`, `scene_starts()` | Match script words to spoken words → start time per scene |
 | `word_timeline()`, `subtitle_cues()`, `srt_time()` | Script words with spoken times → `.srt` subtitles |
 | `make_chapters()`, `write_youtube_text()` | YouTube chapter list (rules applied) → `_youtube.txt` |
-| `build_video()` | Shots, timings CSV, image fitting, picture track (still or slow zoom), sound (narration + ducked music) |
+| `pick_motion()`, `motion_filter()`, `make_weather_layer()`, `render_clip()` | Motion per shot (tag or setting), the FFmpeg filter for each movement, rain/snow layers, one clip with crossfade |
+| `build_video()` | Shots, timings CSV, image fitting, picture track (still or motion clips), sound (narration + ducked music) |
 | `App` | The Tkinter window |
 
 Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
-`WHISPER_MODEL`, `LEAD_IN`, `MIN_SCENE`, `ZOOM`, `MUSIC_LEVELS`,
+`WHISPER_MODEL`, `LEAD_IN`, `MIN_SCENE`, `ZOOM`, `PAN`, `FADE`, `ROCK_DEGREES`,
+`ROCK_SECONDS`, `AUTO_MOTIONS`, `MUSIC_LEVELS`,
 `SUB_MAX_CHARS`, `SUB_MAX_SECONDS`, `CHAPTER_MIN`.
 
 ---

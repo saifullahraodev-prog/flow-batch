@@ -28,9 +28,12 @@ straight to the video step.
 5. The **Check** panel should say:
    *"✓ 9 scenes from scenes.txt in the folder · 9 image(s) · 3 chapters"* and
    *"✓ Every scene has an image"*.
-6. Optional: **Background music** → `music.mp3` (volume *Quiet*), and tick
-   **Slow zoom on images** and **Subtitles on the video**.
-7. Click **Make video** (about 1–2 minutes).
+6. Leave **Motion** on *Auto – zoom & pan* and **Crossfade** ticked. Optional:
+   **Background music** → `music.mp3` (volume *Quiet*), and tick **Subtitles on
+   the video**. The Check panel also shows *"Scene effects: [shake] scene 5 ·
+   [rain] scene 6 · [rock] scene 6 · [snow] scene 9"* – those tags are in this
+   pack's `scenes.txt`.
+7. Click **Make video** (about 2–3 minutes).
 
 **What you should get** (in the copy folder):
 
@@ -42,8 +45,9 @@ straight to the video step.
   | Appears at | 0:00 | 0:07 | 0:12 | 0:18 | 0:24 | 0:28 | 0:34 | 0:37 | 0:42 |
 
   With music: you hear it in the pauses, and it gets quieter while the voice
-  speaks. With zoom: each card slowly zooms in or out. With subtitles: small
-  white text along the bottom, e.g. *"Today we follow a small cargo"*.
+  speaks. Motion: the cards slowly zoom and pan and blend into each other;
+  scene 5 shakes, scene 6 rocks in the rain, scene 9 has snow. With subtitles:
+  small white text along the bottom, e.g. *"Today we follow a small cargo"*.
 - **`test-pack.srt`** – subtitles, e.g. *"Welcome aboard."*, *"Today we follow a
   small cargo"*, *"ship across the ocean."*
 - **`test-pack_youtube.txt`** – the chapter list:
