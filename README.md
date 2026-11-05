@@ -552,8 +552,15 @@ Scene Builder (shorter scenes = pictures change more often; **↑ Merge** /
   > Make the video anyway? Those scenes are left out – their images are not shown.
 
   **Yes** leaves those scenes out (all other pictures stay exactly in time);
-  **No** stops, so you can record the missing part. A scene counts as missing
-  when fewer than 30 % of its words are heard (`MISSING_BELOW`).
+  **No** stops, so you can record the missing part.
+
+  How it decides: words the speech model writes a little differently
+  (names, spellings, "Titanics"/"Titanic's") still count as heard. A scene
+  whose words were mostly not recognised is only called missing when the audio
+  has **no room** for it – the scenes around it follow each other with just a
+  normal pause. If there is time for it (at ~2.5 words per second), it was
+  spoken and is kept, with its picture and subtitles; it was just worded or
+  pronounced differently from the script.
 - **Without any script** – every image gets an equal share of the audio.
 
 ### Pairing images with scenes

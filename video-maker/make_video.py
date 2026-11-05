@@ -46,7 +46,8 @@ TAG_RE = re.compile(r"\[(" + "|".join(MOTION_TAGS + WEATHER_TAGS) + r")\]", re.I
 AUTO_MOTIONS = ("zoom-in", "pan-right", "zoom-out", "pan-left", "zoom-in", "pan-up", "zoom-out", "pan-down")
 MOTION_MODES = {"Auto – zoom & pan": "auto", "Zoom only": "zoom", "Off – still pictures": "off"}
 MUSIC_LEVELS = {"Quiet": 0.10, "Medium": 0.18, "Loud": 0.28}
-MISSING_BELOW = 0.3       # a scene with fewer of its words heard counts as "not in the audio"
+MISSING_BELOW = 0.3       # a scene with fewer of its words recognised is checked against the audio's timing
+SECONDS_PER_WORD = 0.4    # normal narration speed (~2.5 words/s), for that check
 SUB_MAX_CHARS = 42        # one subtitle line
 SUB_MAX_SECONDS = 5.0
 # Burned-in subtitles: small white text, thin black outline, near the bottom.
@@ -321,24 +322,78 @@ def align(lines, spoken):
             s_tok.append(t)
             s_line.append(i)
     sm = difflib.SequenceMatcher(None, s_tok, [t for t, _, _ in spoken], autojunk=False)
-    start_of, end_of = {}, {}
+    pairs = []
     for a, b, n in sm.get_matching_blocks():
-        for k in range(n):
-            start_of[a + k] = spoken[b + k][1]
-            end_of[a + k] = spoken[b + k][2]
+        pairs += [(a + k, b + k) for k in range(n)]
+
+    # Second pass between the exact matches: words the speech model wrote a little
+    # differently ("colour"/"color", "Titanics"/"Titanic's", names) still count.
+    fuzzy, anchors = [], [(-1, -1)] + sorted(pairs) + [(len(s_tok), len(spoken))]
+    for (a0, b0), (a1, b1) in zip(anchors, anchors[1:]):
+        b = b0 + 1
+        for a in range(a0 + 1, a1):
+            for k in range(b, min(b + 4, b1)):
+                if similar(s_tok[a], spoken[k][0]):
+                    fuzzy.append((a, k))
+                    b = k + 1
+                    break
+    start_of, end_of = {}, {}
+    for a, b in pairs + fuzzy:
+        start_of[a] = spoken[b][1]
+        end_of[a] = spoken[b][2]
     return s_line, start_of, end_of, len(start_of) / max(1, len(s_tok))
 
 
-def narration_missing(lines, aligned):
-    """Scenes whose narration is not in the audio (not recorded, or cut out):
-    none – or hardly any – of their words were heard."""
-    s_line, start_of, _, _ = aligned
+def similar(a, b):
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 3:
+        return False
+    return a.startswith(b) or b.startswith(a) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
+
+
+def narration_missing(lines, aligned, spoken):
+    """Scenes whose narration is not in the audio (not recorded, or cut out).
+
+    A scene whose words were hardly recognised is only "missing" when the audio
+    has no room for it: the scenes around it follow each other with just a
+    normal pause. If there is time for it there, it was spoken – the speech model
+    just wrote it differently (names, numbers, accents) – and it is kept.
+    Silence before the first and after the last spoken word doesn't count.
+    """
+    if not spoken:
+        return []
+    speech_start, speech_end = spoken[0][1], spoken[-1][2]
+    s_line, start_of, end_of, _ = aligned
     count, found = [0] * len(lines), [0] * len(lines)
     for j, li in enumerate(s_line):
         count[li] += 1
         found[li] += j in start_of
-    return [i for i in range(len(lines))
-            if count[i] and (found[i] == 0 or (count[i] >= 4 and found[i] / count[i] < MISSING_BELOW))]
+    low = [count[i] > 0 and (found[i] == 0 or (count[i] >= 4 and found[i] / count[i] < MISSING_BELOW))
+           for i in range(len(lines))]
+    first_tok, last_tok = {}, {}
+    for j, li in enumerate(s_line):
+        first_tok.setdefault(li, j)
+        last_tok[li] = j
+
+    missing, i = [], 0
+    while i < len(lines):
+        if not low[i]:
+            i += 1
+            continue
+        k = i  # a run of neighbouring low scenes is judged together
+        while k + 1 < len(lines) and (low[k + 1] or not count[k + 1]):
+            k += 1
+        run = [x for x in range(i, k + 1) if count[x]]
+        a, b = first_tok[run[0]], last_tok[run[-1]]
+        before = [end_of[j] for j in range(a) if j in end_of and not low[s_line[j]]]
+        after = [start_of[j] for j in range(b + 1, len(s_line)) if j in start_of and not low[s_line[j]]]
+        room = (min(after) if after else speech_end) - (max(before) if before else speech_start)
+        needed = SECONDS_PER_WORD * sum(count[x] for x in run)
+        if room < 0.5 * needed + 0.3:
+            missing += run
+        i = k + 1
+    return missing
 
 
 def scene_starts(lines, aligned, total, skip=()):
@@ -347,14 +402,27 @@ def scene_starts(lines, aligned, total, skip=()):
     Scenes in skip (narration not in the audio) get no time: their start is the
     next scene's start.
     """
-    s_line, start_of, _, _ = aligned
+    s_line, start_of, end_of, _ = aligned
     keep = [i for i in range(len(lines)) if i not in skip]
     starts = {}
+
+    def token_time(j):
+        # A word that wasn't recognised: placed evenly between the recognised words around it.
+        p = max((x for x in end_of if x < j and s_line[x] not in skip), default=None)
+        q = min((x for x in start_of if x > j and s_line[x] not in skip), default=None)
+        if p is None or q is None:
+            return None
+        return end_of[p] + (start_of[q] - end_of[p]) * (j - p) / (q - p)
+
     for i in keep:
         idx = [j for j, li in enumerate(s_line) if li == i]
         first = next((j for j in idx if j in start_of), None)
-        # If the line's first words weren't recognised, step back ~0.35 s per word.
-        starts[i] = None if first is None else max(0.0, start_of[first] - 0.35 * (first - idx[0]) - LEAD_IN)
+        if first is None:
+            t = token_time(idx[0]) if idx else None
+            starts[i] = None if t is None else max(0.0, t - LEAD_IN)
+        else:
+            # If the line's first words weren't recognised, step back ~0.35 s per word.
+            starts[i] = max(0.0, start_of[first] - 0.35 * (first - idx[0]) - LEAD_IN)
 
     # Lines with no recognised words: place them evenly between their neighbours.
     known = [(i, s) for i, s in starts.items() if s is not None]
@@ -688,7 +756,7 @@ def build_video(plan, audio, output, background, on_progress, on_status=lambda s
         p_listen, p_img, p_video = 0.45, 0.07, 0.40
         spoken = transcribe_words(ffmpeg, audio, total, lambda f: on_progress(p_listen * f), on_status)
         aligned = align(lines, spoken)
-        skip = set(narration_missing(lines, aligned))
+        skip = set(narration_missing(lines, aligned, spoken))
         if len(skip) == len(lines):
             skip = set()  # nothing matches at all: wrong script or audio – scene_starts reports it
         if skip:
