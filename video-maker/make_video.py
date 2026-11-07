@@ -200,11 +200,15 @@ def scene_number(path):
 
 
 def find_script(folder, script):
-    """The script picked by hand, else the scenes.txt Flow Batch saved in the folder."""
+    """The script picked by hand, else the scenes.txt Flow Batch saved in the folder,
+    else its backup prompts-backup.txt (same scenes, written once at Start)."""
     if script:
         return Path(script)
-    auto = Path(folder) / "scenes.txt"
-    return auto if auto.is_file() else None
+    for name in ("scenes.txt", "prompts-backup.txt"):
+        auto = Path(folder) / name
+        if auto.is_file() and parse_scene_file(auto)[0]:
+            return auto
+    return None
 
 
 def plan_scenes(folder, first_per_prompt, script=None):

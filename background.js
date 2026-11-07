@@ -148,6 +148,17 @@ async function handle(msg, sender) {
     }
     case 'fetchDataUrl':
       return { ok: true, dataUrl: await fetchDataUrl(msg.url) };
+    case 'listDownloads': {
+      // Files of one run folder inside Chrome Downloads that are complete and still on disk.
+      const want = `/${msg.folder}/`.replace(/\\/g, '/').toLowerCase();
+      const items = await chrome.downloads.search({ query: [msg.folder.split('/').pop()], exists: true, limit: 0 });
+      const names = items
+        .filter((d) => d.state === 'complete')
+        .map((d) => d.filename.replace(/\\/g, '/'))
+        .filter((f) => f.toLowerCase().includes(want))
+        .map((f) => f.slice(f.lastIndexOf('/') + 1));
+      return { ok: true, names: [...new Set(names)] };
+    }
     case 'trustedClick':
       await trustedClick(tabId, msg.x, msg.y);
       return { ok: true };

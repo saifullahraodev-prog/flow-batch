@@ -13,7 +13,10 @@
     folder: 'FlowBatch',   // only used if no save folder was chosen (Chrome Downloads fallback)
     style: '',             // added in front of every prompt, e.g. "2D stickman cartoon, flat colours"
     promptSelector: '',    // optional CSS overrides if auto-detection fails
-    buttonSelector: ''
+    buttonSelector: '',
+    retries: 1,            // try a failed prompt again this many times, right away
+    graceSec: 30,          // after a timeout, keep watching this long for a late image
+    autoRecover: true      // Flow keeps failing → pause, reload the page, continue
   };
 
   const state = {
@@ -25,6 +28,10 @@
     // Scene Builder: plain script → scenes table (narration, picture, chapter)
     builder: { script: '', mode: 'medium', name: 'my-video', rows: [] },
     settings: { ...DEFAULTS },
+    claimed: [],           // keys of images already seen or given to a scene – never counted again
+    genTimes: [],          // seconds from submit to first image (recent prompts)
+    recoverRound: 0,       // automatic recoveries in a row
+    resumeAfterReload: false,
     running: false,
     paused: false,
     stopRequested: false
@@ -49,7 +56,11 @@
         settings: state.settings,
         refs: state.refs,
         runFolder: state.runFolder,
-        builder: state.builder
+        builder: state.builder,
+        claimed: state.claimed.slice(-5000),
+        genTimes: state.genTimes,
+        recoverRound: state.recoverRound,
+        resumeAfterReload: state.resumeAfterReload
       }
     });
   }
@@ -62,6 +73,10 @@
     state.refs = data.refs || [];
     state.runFolder = data.runFolder || '';
     if (data.builder) state.builder = { ...state.builder, ...data.builder };
+    state.claimed = data.claimed || [];
+    state.genTimes = data.genTimes || [];
+    state.recoverRound = data.recoverRound || 0;
+    state.resumeAfterReload = !!data.resumeAfterReload;
     state.prompts = (data.prompts || []).map((p) => ({
       ...p,
       status: p.status === 'running' ? 'pending' : p.status
@@ -805,7 +820,52 @@
     return m ? Number(m[1]) : 0;
   }
 
-  async function runOne(index) {
+  // Flow's own error messages. Counted before and during a prompt, so a failed
+  // generation is noticed at once instead of after the full timeout.
+  const FLOW_ERROR = /something went wrong|failed to generate|couldn['’]t generate|could not generate|unable to generate|generation failed|try again later|violates?|against our polic|limit reached|reached your (?:daily )?limit|quota|too many requests/gi;
+  function flowErrors() {
+    // The panel lives outside <body>, so its own log never counts.
+    return (document.body ? document.body.innerText : '').match(FLOW_ERROR) || [];
+  }
+
+  // Every error message Flow ADDS to the page (toasts, failed tiles) – also when the
+  // same message is still showing from an earlier prompt.
+  const flowErrorSeen = { count: 0, last: '' };
+  if (document.body) {
+    new MutationObserver((muts) => {
+      for (const m of muts) {
+        for (const n of m.addedNodes) {
+          const t = (n.nodeType === 1 ? n.innerText || n.textContent : n.textContent) || '';
+          const hit = t.length < 400 && t.match(FLOW_ERROR);
+          if (hit) {
+            flowErrorSeen.count++;
+            flowErrorSeen.last = hit[hit.length - 1];
+          }
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  function claim(keys) {
+    const set = new Set(state.claimed);
+    for (const k of keys) if (!set.has(k)) state.claimed.push(k);
+  }
+
+  // A result that appears in less than half the time of Flow's FASTEST recent image
+  // can't be this prompt's picture: it is a late image of the prompt that gave up.
+  function tooEarlyMs() {
+    if (state.genTimes.length < 3) return 0;
+    return Math.max(1.5, 0.5 * Math.min(...state.genTimes)) * 1000;
+  }
+
+  // Images of one prompt: a Map key → src of images that weren't there before.
+  function freshImages(box, before) {
+    return [...collectImages(liveCard(box))].filter(([k]) => !before.has(k));
+  }
+
+  // lateFor: { i, seen } – the last prompt that gave up and the images that were on
+  // the page at that moment. Anything that appeared since is that prompt's late image.
+  async function runOne(index, lateFor) {
     const p = state.prompts[index];
     let box = findPromptBox();
     if (!box) throw new Error('Prompt box not found – set a prompt selector under Advanced.');
@@ -813,9 +873,26 @@
     await ensureReferences(box, index);
     box = findPromptBox() || box;
 
-    // Snapshot existing images (incl. the references) so only new results count.
+    // Snapshot existing images (incl. the references and every image already given
+    // to a scene) so only new results count.
     const refKeys = [...liveCard(box).querySelectorAll('img')].map((i) => i.currentSrc || i.src).filter(Boolean).map(imageKey);
-    const before = new Set([...collectImages().keys(), ...refKeys]);
+    const late = [];
+    const pageNow = collectImages();
+    if (lateFor) {
+      const claimed = new Set(state.claimed);
+      for (const [k, src] of pageNow) if (!lateFor.seen.has(k) && !claimed.has(k)) late.push(src);
+    }
+    const pageKeys = [...pageNow.keys()];
+    claim(pageKeys);
+    // Retrying the prompt that gave up, and its image has arrived meanwhile: use it
+    // instead of generating (and paying for) a new one.
+    if (lateFor && lateFor.i === index && late.length) {
+      log(`#${index + 1}: its image arrived late – using it, no new generation`);
+      return { status: 'done', fresh: late, late: [] };
+    }
+    const before = new Set([...pageKeys, ...refKeys, ...state.claimed]);
+    const errorsBefore = flowErrors().length;
+    const errorEventsBefore = flowErrorSeen.count;
     const prompt = fullPrompt(p);
     setText(box, prompt);
     await sleep(800);
@@ -824,27 +901,66 @@
       throw new Error('Flow did not accept the prompt – use Advanced → Test detection, or set the button selector.');
     }
 
-    const { stableSec, timeoutSec } = state.settings;
+    const { stableSec, timeoutSec, graceSec } = state.settings;
     const perPrompt = flowImageCount() || state.settings.perPrompt;
+    const early = lateFor ? tooEarlyMs() : 0;
     const start = Date.now();
+    let firstAt = 0;
     let lastCount = 0;
     let lastChange = Date.now();
     while (!state.stopRequested) {
       await sleep(1000);
-      const fresh = [...collectImages(liveCard(box))].filter(([k]) => !before.has(k)).map(([, src]) => src);
+      const elapsed = Date.now() - start;
+      for (const [k, src] of freshImages(box, before)) {
+        if (early && elapsed < early) {
+          // Too early for this prompt: it belongs to the earlier prompt that gave up.
+          late.push(src);
+          before.add(k);
+          claim([k]);
+        }
+      }
+      const fresh = freshImages(box, before).map(([, src]) => src);
+      if (fresh.length && !firstAt) firstAt = elapsed;
       if (fresh.length !== lastCount) {
         lastCount = fresh.length;
         lastChange = Date.now();
         setRowNote(index, `${fresh.length} image(s)…`);
       }
+      const finish = (status) => {
+        claim(freshImages(box, before).map(([k]) => k));
+        if (status === 'done' && firstAt) state.genTimes = [...state.genTimes, firstAt / 1000].slice(-15);
+        return { status, fresh, late };
+      };
       const quiet = Date.now() - lastChange;
-      if (fresh.length >= perPrompt && quiet >= 2000) return { status: 'done', fresh };
-      if (fresh.length > 0 && quiet >= stableSec * 1000) return { status: 'done', fresh };
-      if (Date.now() - start > timeoutSec * 1000) {
-        return { status: fresh.length ? 'done' : 'timeout', fresh };
+      if (fresh.length >= perPrompt && quiet >= 2000) return finish('done');
+      if (fresh.length > 0 && quiet >= stableSec * 1000) return finish('done');
+      if (!fresh.length) {
+        const errs = flowErrors();
+        const newEvent = flowErrorSeen.count > errorEventsBefore;
+        if ((errs.length > errorsBefore || newEvent) && elapsed > 3000) {
+          const what = newEvent ? flowErrorSeen.last : errs[errs.length - 1];
+          return { status: 'error', fresh, late, seen: new Set(collectImages().keys()), reason: `Flow showed an error ("${what}")` };
+        }
+      }
+      if (elapsed > timeoutSec * 1000) {
+        if (fresh.length) return finish('done');
+        // Gave up – but keep watching a little longer, so a slow image still lands
+        // here and not in the next scene.
+        setRowNote(index, 'waiting for a late image…');
+        const until = Date.now() + graceSec * 1000;
+        while (Date.now() < until && !state.stopRequested) {
+          await sleep(1000);
+          if (freshImages(box, before).length) {
+            await sleep(2000);
+            const got = freshImages(box, before).map(([, src]) => src);
+            claim(freshImages(box, before).map(([k]) => k));
+            return { status: 'done', fresh: got, late };
+          }
+        }
+        return { status: 'timeout', fresh: [], late, seen: new Set(collectImages().keys()), reason: `no image after ${timeoutSec + graceSec} s` };
       }
     }
-    return { status: 'pending', fresh: [] };
+    return { status: 'pending', fresh: [], late };
   }
 
   // ---------- downloads ----------
@@ -935,6 +1051,24 @@
     el.textContent = dirHandle ? `📁 ${dirHandle.name}` : 'not chosen yet';
   }
 
+  // getBlob with retries; a failed URL is looked up again on the page by its image key.
+  async function getBlobSafe(src) {
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const blob = await getBlob(src);
+        if (blob && blob.size > 1000) return blob;
+        throw new Error('empty image');
+      } catch (e) {
+        lastErr = e;
+        const again = collectImages().get(imageKey(src));
+        if (again) src = again;
+        await sleep(1500 * attempt);
+      }
+    }
+    throw lastErr;
+  }
+
   async function getBlob(src) {
     try {
       const r = await fetch(src, { credentials: 'include' });
@@ -986,7 +1120,7 @@
     state.prompts.forEach((p, i) => {
       if (p.chapter) lines.push(`## ${p.chapter}`);
       const files = p.files && p.files.length ? p.files.join(', ')
-        : p.status === 'done' ? '(not saved)'
+        : p.status === 'done' || p.status === 'nosave' ? '(not saved - use Retry failed)'
         : p.status === 'error' || p.status === 'timeout' ? '(failed - use Retry failed)' : '(not made yet)';
       lines.push(`# image: ${files}`);
       lines.push(`${p.narration || ''} | ${p.text}`);
@@ -1000,13 +1134,18 @@
   }
 
   async function saveImages(index, srcs) {
-    const base = `${String(index + 1).padStart(3, '0')}_${slug(state.prompts[index].text)}`;
+    const p = state.prompts[index];
+    const base = `${String(index + 1).padStart(3, '0')}_${slug(p.text)}`;
+    // Remember where the images are, so a failed download can be repeated later
+    // without generating again (page-only blob:/data: URLs can't be kept).
+    p.found = srcs.filter((src) => !/^(blob|data):/.test(src));
     let saved = 0;
+    let failed = 0;
     const names = [];
     const hashes = new Set();
     for (let k = 0; k < srcs.length; k++) {
       try {
-        const blob = await getBlob(srcs[k]);
+        const blob = await getBlobSafe(srcs[k]);
         // Skip byte-identical copies (same image reached through two URLs).
         const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
         const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -1017,11 +1156,103 @@
         names.push(name);
         saved++;
       } catch (e) {
-        log(`Save failed: ${e.message}`);
+        failed++;
+        log(`#${index + 1} save failed: ${e.message}`);
       }
     }
-    state.prompts[index].files = names;
+    p.files = names;
+    p.status = failed && !saved ? 'nosave' : 'done';
     return saved;
+  }
+
+  async function fixDownloads() {
+    const todo = state.prompts.map((p, i) => [p, i]).filter(([p]) => p.status === 'nosave');
+    if (!todo.length) return;
+    log(`Downloading ${todo.length} image(s) again that were not saved…`);
+    for (const [p, i] of todo) {
+      if (state.stopRequested) break;
+      if (!p.found || !p.found.length) {
+        p.status = 'error';
+        log(`#${i + 1}: the image is no longer reachable – it will be generated again`);
+        continue;
+      }
+      const n = await saveImages(i, p.found);
+      log(n ? `#${i + 1} saved now` : `#${i + 1} still not saved – it will be generated again on the next Retry`);
+      if (!n) p.status = 'error';
+    }
+    save();
+    render();
+  }
+
+  // ---------- folder check: the folder is the truth ----------
+
+  async function listRunFiles() {
+    const dir = await folderReady(false);
+    if (dir) {
+      try {
+        const sub = await dir.getDirectoryHandle(state.runFolder);
+        const names = [];
+        for await (const [name, h] of sub.entries()) if (h.kind === 'file') names.push(name);
+        return names;
+      } catch {
+        return [];
+      }
+    }
+    const res = await chrome.runtime.sendMessage({ type: 'listDownloads', folder: `${state.settings.folder}/${state.runFolder}` });
+    return (res && res.ok && res.names) || null;
+  }
+
+  async function checkFolder(quiet) {
+    if (!state.runFolder) {
+      if (!quiet) log('Nothing to check yet – no run folder (press Start first).');
+      return;
+    }
+    const names = await listRunFiles();
+    if (!names) {
+      if (!quiet) log('Could not read the save folder.');
+      return;
+    }
+    let ok = 0;
+    let found = 0;
+    let missing = 0;
+    state.prompts.forEach((p, i) => {
+      const prefix = `${String(i + 1).padStart(3, '0')}_`;
+      const files = names.filter((n) => n.startsWith(prefix) && /\.(png|jpe?g|webp|gif)$/i.test(n)).sort();
+      if (files.length) {
+        if (p.status !== 'done') found++;
+        else ok++;
+        p.files = files;
+        p.images = Math.max(p.images || 0, files.length);
+        p.status = 'done';
+      } else if (p.status === 'done' || p.status === 'nosave') {
+        p.files = [];
+        p.status = p.found && p.found.length ? 'nosave' : 'error';
+        missing++;
+      }
+    });
+    save();
+    render();
+    if (state.settings.autoDownload) await saveSceneFile(true);
+    if (!quiet || missing || found) {
+      log(`Folder check: ${ok + found} scene(s) have their image` + (found ? ` (${found} found in the folder)` : '') +
+        (missing ? `, ${missing} missing – Retry failed downloads or makes them again` : ', nothing missing') + '. scenes.txt updated.');
+    }
+  }
+
+  // Backup of the prompt list in the run folder, in the "(narration)" + prompt format.
+  // Make Video uses it when scenes.txt is missing.
+  async function saveBackupList() {
+    const lines = ['# Backup of the prompt list of this run (Flow Batch). Make Video uses it if scenes.txt is missing.', ''];
+    for (const p of state.prompts) {
+      if (p.chapter) lines.push(`## ${p.chapter}`);
+      if (p.narration) lines.push(`(${p.narration})`);
+      lines.push(p.text || '-', '');
+    }
+    try {
+      await writeToRun('prompts-backup.txt', new Blob([lines.join('\r\n')], { type: 'text/plain' }), true);
+    } catch (e) {
+      log(`Could not save prompts-backup.txt: ${e.message}`);
+    }
   }
 
   function newRunFolder() {
@@ -1039,7 +1270,7 @@
     state.paused = false;
     state.stopRequested = false;
     // New run (nothing done yet) → new sub-folder; Resume keeps the old one.
-    if (!state.runFolder || !state.prompts.some((p) => p.status === 'done')) {
+    if (!state.runFolder || !state.prompts.some((p) => p.status === 'done' || p.status === 'nosave')) {
       state.runFolder = newRunFolder();
       save();
     }
@@ -1047,48 +1278,146 @@
     log(`Started – saving to ${dirHandle ? dirHandle.name : 'Chrome Downloads/' + state.settings.folder}/${state.runFolder}`);
     if (state.refs.length) log(`Using ${state.refs.length} reference image(s) for every prompt`);
     if ((state.settings.style || '').trim()) log(`Style added to every prompt: "${state.settings.style.trim()}"`);
-    if (state.settings.autoDownload) await saveSceneFile();
+    if (state.settings.autoDownload) {
+      if (state.prompts.some((p) => p.status === 'done' || p.status === 'nosave')) await checkFolder(true);
+      await saveSceneFile();
+      await saveBackupList();
+      await fixDownloads();
+    }
 
-    for (let i = 0; i < state.prompts.length && !state.stopRequested; i++) {
-      const p = state.prompts[i];
-      if (p.status === 'done') continue;
-      while (state.paused && !state.stopRequested) await sleep(300);
-      if (state.stopRequested) break;
-
-      p.status = 'running';
-      render();
-      try {
-        const { status, fresh } = await runOne(i);
-        p.status = status;
-        p.images = fresh.length;
-        if (status === 'timeout') log(`#${i + 1} timed out with no images`);
-        if (fresh.length && state.settings.autoDownload) {
-          const n = await saveImages(i, fresh);
-          log(`#${i + 1} done – ${fresh.length} image(s), ${n} saved`);
-        } else if (fresh.length) {
-          log(`#${i + 1} done – ${fresh.length} image(s)`);
+    let failStreak = 0;
+    const streak = []; // prompts that failed in a row
+    let lastFailed = null; // { i, seen } – the last prompt that gave up; its image may still arrive late
+    const runPass = async () => {
+      for (let i = 0; i < state.prompts.length && !state.stopRequested; i++) {
+        const p = state.prompts[i];
+        if (p.status !== 'pending' && p.status !== 'error' && p.status !== 'timeout') continue;
+        if (p.status !== 'pending' && !runPass.includeFailed) continue;
+        for (let attempt = 0; ; attempt++) {
+          while (state.paused && !state.stopRequested) await sleep(300);
+          if (state.stopRequested) break;
+          p.status = 'running';
+          render();
+          let res;
+          try {
+            res = await runOne(i, lastFailed);
+          } catch (e) {
+            res = { status: 'error', fresh: [], late: [], reason: e.message };
+          }
+          if (res.late && res.late.length && lastFailed) {
+            // An earlier prompt's image arrived late – it goes to that scene, not this one.
+            const li = lastFailed.i;
+            const q = state.prompts[li];
+            if (q.status !== 'done' && li !== i) {
+              log(`#${li + 1}: its image arrived late – saved for scene ${li + 1}`);
+              q.images = res.late.length;
+              if (state.settings.autoDownload) await saveImages(li, res.late);
+              else q.status = 'done';
+            }
+            lastFailed = null;
+          }
+          if (res.status === 'pending') {
+            p.status = 'pending';
+            break;
+          }
+          if (res.status === 'done') {
+            p.images = res.fresh.length;
+            if (state.settings.autoDownload) {
+              const n = await saveImages(i, res.fresh);
+              log(`#${i + 1} done – ${res.fresh.length} image(s), ${n} saved` + (p.status === 'nosave' ? ' – will try the download again' : ''));
+            } else {
+              p.status = 'done';
+              log(`#${i + 1} done – ${res.fresh.length} image(s)`);
+            }
+            failStreak = 0;
+            streak.length = 0;
+            state.recoverRound = 0;
+            if (lastFailed && lastFailed.i === i) lastFailed = null;
+            break;
+          }
+          p.status = res.status;
+          lastFailed = res.seen ? { i, seen: res.seen } : null;
+          log(`#${i + 1} ${res.status === 'timeout' ? 'timed out' : 'failed'}: ${res.reason || ''}`);
+          // Without the references every result would be wrong – stop instead of wasting credits.
+          if (/reference image/i.test(res.reason || '')) {
+            state.stopRequested = true;
+            log('Stopped so no credits are wasted. Check the reference images and press Resume.');
+            break;
+          }
+          // Flow refuses this wording – trying again would only cost credits.
+          if (/violat|polic/i.test(res.reason || '')) {
+            log(`#${i + 1}: Flow refused this prompt – change its wording, then Retry failed`);
+            break;
+          }
+          failStreak++;
+          streak.push(i);
+          if (failStreak >= 3) {
+            // These failed because Flow was down, not because of their prompts: queue
+            // them again before pausing / reloading.
+            for (const k of streak) if (state.prompts[k].status !== 'done') state.prompts[k].status = 'pending';
+            save();
+            await recover(failStreak);
+            if (state.stopRequested) break;
+            failStreak = 0;
+            streak.length = 0;
+            continue;
+          }
+          if (attempt >= (runPass.includeFailed ? 0 : state.settings.retries)) break;
+          log(`#${i + 1}: trying again (${attempt + 1}/${state.settings.retries})…`);
+          await interruptibleSleep(5000);
         }
-      } catch (e) {
-        p.status = 'error';
-        log(`#${i + 1} error: ${e.message}`);
-        // Without the references every result would be wrong – stop instead of wasting credits.
-        if (/reference image/i.test(e.message)) {
-          state.stopRequested = true;
-          log('Stopped so no credits are wasted. Check the reference images and press Resume.');
-        }
+        save();
+        render();
+        if (state.settings.autoDownload) await saveSceneFile(true);
+        if (i < state.prompts.length - 1) await interruptibleSleep(state.settings.delaySec * 1000);
       }
-      save();
-      render();
-      if (state.settings.autoDownload) await saveSceneFile(true);
-      if (i < state.prompts.length - 1) await interruptibleSleep(state.settings.delaySec * 1000);
+    };
+    runPass.includeFailed = false;
+    await runPass();
+    // One more round for what failed, now that Flow had time to recover.
+    const failedNow = state.prompts.filter((p) => p.status === 'error' || p.status === 'timeout').length;
+    if (failedNow && !state.stopRequested && state.settings.retries > 0) {
+      log(`Second round for ${failedNow} failed prompt(s)…`);
+      runPass.includeFailed = true;
+      await runPass();
+    }
+    if (state.settings.autoDownload && !state.stopRequested) {
+      await fixDownloads();
+      await checkFolder(true);
     }
 
     state.running = false;
     state.paused = false;
     chrome.runtime.sendMessage({ type: 'detach' }).catch(() => {}); // removes the "debugging" bar
-    log(state.stopRequested ? 'Stopped' : 'Finished all prompts');
+    const left = state.prompts.filter((p) => p.status !== 'done').length;
+    log(state.stopRequested ? 'Stopped' : left ? `Finished – ${left} scene(s) still without an image: press Retry failed` : 'Finished all prompts – every scene has its image');
     state.stopRequested = false;
     render();
+  }
+
+  // Flow failed several times in a row: wait (2, then 5, then 10 minutes), reload
+  // the page and carry on by itself. After three rounds, stop.
+  async function recover(fails) {
+    const waits = [2, 5, 10];
+    const round = state.recoverRound;
+    if (!state.settings.autoRecover || round >= waits.length) {
+      state.stopRequested = true;
+      log(`Flow failed ${fails} times in a row – stopped. Check Flow (limits, errors), then press Start to continue.`);
+      return;
+    }
+    log(`Flow failed ${fails} times in a row – pausing ${waits[round]} min, then reloading the page and continuing by itself…`);
+    const scale = (window.__flowBatchTest && window.__flowBatchTest.recoverScale) || 1; // tests only
+    await interruptibleSleep(waits[round] * 60000 * scale);
+    if (state.stopRequested) return;
+    state.recoverRound = round + 1;
+    state.prompts.forEach((p) => {
+      if (p.status === 'running') p.status = 'pending';
+    });
+    state.resumeAfterReload = true;
+    save();
+    await sleep(500);
+    location.reload();
+    await sleep(60000); // the reload ends this script
   }
 
   // ---------- panel UI (shadow DOM so Flow's styles don't clash) ----------
@@ -1245,7 +1574,10 @@
             <span>Wait between prompts (s)</span><input type="number" min="0" data-k="delaySec">
             <span>Done when no new image for (s)</span><input type="number" min="2" data-k="stableSec">
             <span>Give up after (s)</span><input type="number" min="30" data-k="timeoutSec">
+            <span>Wait for a late image (s)</span><input type="number" min="0" data-k="graceSec">
+            <span>Try a failed prompt again (times)</span><input type="number" min="0" max="5" data-k="retries">
           </div>
+          <label class="chk" style="margin-top:6px"><input type="checkbox" data-k="autoRecover"> If Flow keeps failing: pause, reload the page and continue</label>
           <label class="chk" style="margin-top:6px"><input type="checkbox" data-k="autoDownload"> Download images automatically</label>
           <div class="grid" style="grid-template-columns: 1fr 150px; margin-top:4px">
             <span>Fallback Downloads sub-folder</span><input type="text" data-k="folder">
@@ -1267,6 +1599,7 @@
           <button id="stop">Stop</button>
           <button id="retry" title="Run again only the prompts that failed (❌) or timed out (⚠️)">Retry failed</button>
           <button id="reset" title="Mark every prompt as not done">Reset</button>
+          <button id="check" title="Compare the save folder with the list: missing images are queued for Retry, scenes.txt is rewritten">Check folder</button>
         </div>
         <div class="bar"><div id="bar"></div></div>
         <div class="list" id="list"></div>
@@ -1311,7 +1644,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     </div>`;
 
   const $ = (id) => root.getElementById(id);
-  const ICON = { pending: '○', running: '⏳', done: '✅', timeout: '⚠️', error: '❌' };
+  const ICON = { pending: '○', running: '⏳', done: '✅', timeout: '⚠️', error: '❌', nosave: '💾' };
 
   function log(msg) {
     const el = $('log');
@@ -1344,6 +1677,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
       const note = document.createElement('span');
       note.className = 'note';
       if (p.status === 'done') note.textContent = `${p.images} image(s)`;
+      if (p.status === 'nosave') note.textContent = 'image made but not saved – Retry failed downloads it';
       row.append(icon, num, text, note);
       list.append(row);
     });
@@ -1351,7 +1685,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     if (running) running.scrollIntoView({ block: 'nearest' });
 
     const done = state.prompts.filter((p) => p.status === 'done').length;
-    const failed = state.prompts.filter((p) => p.status === 'error' || p.status === 'timeout').length;
+    const failed = state.prompts.filter((p) => ['error', 'timeout', 'nosave'].includes(p.status)).length;
     const pending = state.prompts.filter((p) => p.status === 'pending').length;
     const total = state.prompts.length;
     $('bar').style.width = total ? `${(done / total) * 100}%` : '0';
@@ -1367,6 +1701,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     $('pause').textContent = state.paused ? 'Continue' : 'Pause';
     $('stop').disabled = !state.running;
     $('reset').disabled = state.running || !total;
+    $('check').disabled = state.running || !state.runFolder;
     $('pick').disabled = state.running;
     $('build').disabled = state.running;
     $('splitMode').value = state.settings.splitMode;
@@ -1412,6 +1747,8 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
       images: 0
     }));
     state.runFolder = ''; // new file → new run folder
+    state.claimed = [];
+    state.recoverRound = 0;
     save();
     render();
     const scenes = state.prompts.filter((p) => p.narration).length;
@@ -1735,10 +2072,12 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     log('Stopping…');
   };
   $('retry').onclick = async () => {
-    // Only the failed ones: start() skips prompts that are done.
+    // Only the failed ones: start() skips prompts that are done; "not saved" ones are
+    // downloaded again instead of generated again.
     state.prompts.forEach((p) => {
       if (p.status === 'error' || p.status === 'timeout') p.status = 'pending';
     });
+    state.recoverRound = 0;
     save();
     if (state.settings.autoDownload && canPickFolder) {
       try {
@@ -1755,10 +2094,14 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
       p.status = 'pending';
       p.images = 0;
       p.files = [];
+      p.found = [];
     });
+    state.claimed = [];
+    state.recoverRound = 0;
     save();
     render();
   };
+  $('check').onclick = () => checkFolder(false).catch((e) => log(`Folder check: ${e.message}`));
   $('test').onclick = () => {
     const box = findPromptBox();
     const btn = box && findGenerateButton(box);
@@ -1776,7 +2119,9 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     input.onchange = () => {
       const k = input.dataset.k;
       state.settings[k] =
-        input.type === 'checkbox' ? input.checked : input.type === 'number' ? Number(input.value) || DEFAULTS[k] : input.value.trim();
+        input.type === 'checkbox' ? input.checked
+          : input.type === 'number' ? (input.value === '' || isNaN(Number(input.value)) ? DEFAULTS[k] : Number(input.value))
+          : input.value.trim();
       save();
     };
   }
@@ -1846,5 +2191,24 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
     renderFolder();
     log(`Flow Batch v${version} ready (screen ${window.innerWidth}×${window.innerHeight})`);
     if (state.prompts.length) log(`Restored ${state.prompts.length} prompts from last session`);
+    if (state.resumeAfterReload) autoResume();
   });
+
+  // After an automatic reload (see recover): wait for Flow, then continue the run.
+  async function autoResume() {
+    state.resumeAfterReload = false;
+    save();
+    log('Page reloaded after Flow errors – continuing by itself…');
+    if (!(await waitFor(() => findPromptBox(), 60000))) {
+      log('Flow did not come back (no prompt box). Press Start when Flow works again.');
+      return;
+    }
+    // The save folder must still be writable, or images would land somewhere else.
+    if (state.settings.autoDownload && canPickFolder && (await IDB.get('dir').catch(() => null)) && !(await folderReady(false))) {
+      log('Chrome needs you to confirm the save folder again – press Start (Resume) to continue.');
+      return;
+    }
+    await sleep(3000);
+    start();
+  }
 })();

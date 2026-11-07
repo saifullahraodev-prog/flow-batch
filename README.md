@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.7.1** (shown in the panel title).
+Current version: **1.8.0** (shown in the panel title).
 
 ---
 
@@ -265,9 +265,19 @@ seconds → next scene.
 
 ### Step 4 – Fix failures
 
+Most problems fix themselves during the run (see
+[When Flow fails](#when-flow-fails--what-the-extension-does-by-itself)): a failed
+scene is tried again, a late image still lands in the right scene, a failed
+download is repeated, and when Flow stops working the extension pauses, reloads
+the page and continues.
+
 When the run ends, the panel shows e.g. *"20 prompts, 18 done, 2 failed"*.
-Click **Retry failed (2)** – only those two run again, saving into the same
-folder.
+Click **Retry failed (2)** – only those two run again (scenes marked 💾 are just
+downloaded again, not generated again), saving into the same folder.
+
+**Not sure everything is in the folder?** Click **Check folder**: it compares the
+folder with the list, marks every scene whose image is missing, and rewrites
+`scenes.txt` with the real file names. Then **Retry failed** fills the gaps.
 
 ### Step 5 – Review the images (optional)
 
@@ -418,12 +428,13 @@ Scene Builder shows narration and picture under each other.
 | **Style box** | Text added in front of every prompt |
 | **Reference images…** | Up to 2 images attached to Flow's prompt for every scene. Remove one with its **×** |
 | **Save folder…** | Where results are saved (chosen once, remembered) |
-| Progress bar & list | ○ pending · ⏳ running · ✅ done · ⚠️ timed out · ❌ failed |
+| Progress bar & list | ○ pending · ⏳ running · ✅ done · ⚠️ timed out · ❌ failed · 💾 made but not saved (Retry downloads it again) |
 | **Start / Resume** | Runs every scene not yet done. After a reload or Stop it says *Resume* |
 | **Pause / Continue** | Holds the run after the current scene finishes |
 | **Stop** | Stops after the current step |
-| **Retry failed (N)** | Re-runs only failed/timed-out scenes into the same folder |
+| **Retry failed (N)** | Re-runs only failed/timed-out scenes into the same folder; 💾 scenes are only downloaded again |
 | **Reset** | Marks every scene as not done (to run the whole list again) |
+| **Check folder** | Compares the save folder with the list: scenes whose image is missing are marked for **Retry failed**, images found in the folder are marked ✅, `scenes.txt` is rewritten with the real names |
 | Log | What happened, step by step – send a screenshot of it when reporting a problem |
 | **–** / **×** | Minimise / hide the panel (click the toolbar icon to show it again) |
 
@@ -435,6 +446,9 @@ Scene Builder shows narration and picture under each other.
 | Wait between prompts (s) | 5 | Pause before the next scene. 20–30 s is a more human pace |
 | Done when no new image for (s) | 10 | Finish a scene early if fewer images than expected arrive |
 | Give up after (s) | 240 | A scene producing nothing for this long is marked ⚠️ and skipped |
+| Wait for a late image (s) | 30 | After *Give up after*, keep watching this long – a slow image still lands in its own scene |
+| Try a failed prompt again (times) | 1 | Immediate retries of a failed scene. 0 = never (saves credits). Prompts Flow refuses for policy reasons are never retried |
+| If Flow keeps failing: pause, reload the page and continue | on | After 3 failures in a row: wait 2 min, reload Flow, continue by itself (then 5, then 10 min; after that it stops) |
 | Download images automatically | on | Save results to the save folder |
 | Fallback Downloads sub-folder | `FlowBatch` | Used only if no save folder is chosen (Chrome's Downloads folder) |
 
@@ -453,7 +467,24 @@ the highlighted line → **Copy → Copy selector**.
 
 The scene list, statuses, style, references and settings are stored by the
 extension. If the page reloads or Chrome restarts, the panel comes back and
-**Resume** continues where it stopped.
+**Resume** continues where it stopped. On Resume, the folder is checked first, so
+images that never reached the folder are fetched or made again.
+
+### When Flow fails – what the extension does by itself
+
+| What happens in Flow | What Flow Batch does |
+|---|---|
+| Flow shows an error ("Something went wrong", "try again later", limits) | Noticed within seconds (not after the full timeout); the scene is tried again (*Try a failed prompt again*) |
+| Flow refuses the prompt (policy) | Not retried (would only cost credits) – log says to change the wording |
+| Flow is slow: no image within *Give up after* | Keeps watching *Wait for a late image* seconds longer |
+| The image arrives even later – while the NEXT scene runs | Recognised as late (it appears faster than Flow can ever make an image) and saved for **its own** scene, never for the next one. A retry of that scene uses it instead of generating again |
+| Every image is counted once | Images already seen or given to a scene are never counted again – also after a reload |
+| Download fails | 3 attempts; if still failing the scene is marked 💾 and downloaded again at the end of the run / with **Retry failed** – no new generation |
+| Flow fails 3 times in a row (down, stuck, limits) | Those scenes are queued again; pause 2 min → reload Flow → continue by itself. Then 5 and 10 min. After that it stops and says so |
+| End of the run | One more round for the scenes that failed, re-download of 💾 scenes, folder check, `scenes.txt` rewritten |
+
+After an automatic reload, Chrome may ask you to confirm the save folder again –
+then the log says so and **Resume** continues.
 
 ---
 
@@ -462,7 +493,8 @@ extension. If the page reloads or Chrome restarts, the panel comes back and
 ```
 <your save folder>\
 └── titanic_2026-10-26_1530\          ← one folder per run: <file name>_<date>_<time>
-    ├── scenes.txt                     ← written automatically at Start (for Make Video)
+    ├── scenes.txt                     ← written automatically, updated after every scene (for Make Video)
+    ├── prompts-backup.txt             ← backup of the scene list ((narration) + prompt) – Make Video uses it if scenes.txt is missing
     ├── 001_stickman-sailors-waving-from-a-huge_1.png
     ├── 001_stickman-sailors-waving-from-a-huge_2.png
     ├── 002_stickman-captain-smiling-on-the-deck_1.png
@@ -528,7 +560,7 @@ scroll (the bottom bar stays visible), on big ones the Check panel grows.
 |---|---|
 | Images folder | A run folder from Flow Batch (or any folder of images) |
 | Narration audio | One audio file for the whole video: mp3, wav, m4a, aac, ogg, flac |
-| Script (optional) | Only needed if the folder has no `scenes.txt`. A `.txt` with one narration line per scene, scene-file lines, or your `(narration)` + prompt file. **✕** clears it |
+| Script (optional) | Only needed if the folder has no `scenes.txt` (or its backup `prompts-backup.txt`, used automatically when `scenes.txt` is missing). A `.txt` with one narration line per scene, scene-file lines, or your `(narration)` + prompt file. **✕** clears it |
 | Only the first image of each prompt | On: one image per scene (`_1`, or `_2` if `_1` was deleted). Off: all images of a scene share its time |
 | Background music (optional) | A music file and its volume (Quiet / Medium / Loud). Loops, fades out over the last 3 s, and dips about 8 dB whenever the narrator speaks. **✕** clears it |
 | Motion | *Auto – zoom & pan*: every picture moves – slow zoom in/out (8 %) and pans (picture enlarged 10 % and slid across), in a varied order. *Zoom only*: zoom in/out alternating. *Off*: still pictures. Tags in the scene file override it per scene |
@@ -665,9 +697,12 @@ little, since the finished picture is encoded once more.
    click. If Flow doesn't react within 6 s, Enter is tried, then other methods.
    It never re-submits a prompt Flow has accepted.
 4. **Wait** – new images on the page are counted (by Flow's image ID, so the
-   grid tile and the large preview count once) until Flow's `xN` images have
-   arrived, or no new image appears for *Done when…* seconds, or *Give up after*
-   is reached.
+   grid tile and the large preview count once; images already given to a scene
+   never count again) until Flow's `xN` images have arrived, or no new image
+   appears for *Done when…* seconds, or *Give up after* (+ *Wait for a late
+   image*) is reached. Flow's error messages end the wait at once. An image
+   arriving faster than half of Flow's fastest recent generation belongs to the
+   previous scene that gave up.
 5. **Save** – images are fetched and written into the run folder; identical
    files are skipped.
 
@@ -772,7 +807,11 @@ Tunable constants at the top of `make_video.py`: `WIDTH`, `HEIGHT`, `FPS`,
 | "Save as" box for every image | Choose a **Save folder…** in the panel. (Chrome Downloads is only the fallback) |
 | Chrome asks again for folder permission | Normal after a browser restart – choose *Allow on every visit* |
 | Errors listed in `chrome://extensions` | Click **Clear all**, reload the extension, try again – old errors stay listed until cleared |
-| A scene times out (⚠️) | Flow was slow or refused the prompt; use **Retry failed**, or raise *Give up after* |
+| A scene times out (⚠️) | Flow was slow or refused the prompt; use **Retry failed**, or raise *Give up after* / *Wait for a late image* |
+| Images seem to be missing from the folder | Click **Check folder**, then **Retry failed** |
+| A scene shows 💾 | The image was made but the download failed – **Retry failed** downloads it again (no credits) |
+| The run stopped with "Flow failed N times in a row" | Flow is down or a limit was reached. Check Flow, then press **Resume** |
+| `scenes.txt` missing or broken | Make Video uses `prompts-backup.txt` from the run folder automatically. Or click **Check folder** to write `scenes.txt` again |
 
 ### Make Video
 
