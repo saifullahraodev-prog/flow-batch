@@ -947,7 +947,6 @@ class App(tk.Tk):
         super().__init__()
         self.title("Flow Batch – Make Video")
         self.configure(bg=C_BG)
-        self.resizable(False, False)
         self.folder = tk.StringVar()
         self.audio = tk.StringVar()
         self.script = tk.StringVar()
@@ -969,8 +968,22 @@ class App(tk.Tk):
         tk.Label(head, text="Images + narration  →  a YouTube-ready video, every picture on its line",
                  bg=C_HEAD, fg=C_HEAD_SUB, font=(FONT, 10)).pack(anchor="w")
 
-        body = tk.Frame(self, bg=C_BG, padx=18, pady=12)
-        body.pack(fill="both")
+        # Bottom bar (progress + buttons) stays visible; the cards in between scroll
+        # when the screen is too small for them.
+        foot = tk.Frame(self, bg=C_BG, padx=18, pady=10)
+        foot.pack(side="bottom", fill="x")
+        mid = tk.Frame(self, bg=C_BG)
+        mid.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(mid, bg=C_BG, highlightthickness=0, bd=0)
+        self.vscroll = ttk.Scrollbar(mid, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vscroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(self.canvas, bg=C_BG, padx=18, pady=12)
+        self.body = body
+        self.body_win = self.canvas.create_window(0, 0, window=body, anchor="nw")
+        body.bind("<Configure>", lambda e: self._fit_body())
+        self.canvas.bind("<Configure>", lambda e: self._fit_body())
+        self.bind_all("<MouseWheel>", self._wheel)
 
         # 1. Files
         files = self._card(body, "1", "Your files")
@@ -1007,14 +1020,15 @@ class App(tk.Tk):
                      state="readonly").pack(side="left", padx=(8, 0))
 
         # 3. Check
-        check = self._card(body, "3", "Check")
+        check = self._card(body, "3", "Check", grow=True)
+        check.rowconfigure(0, weight=1)
         check.columnconfigure(0, weight=1, minsize=0)
         check.columnconfigure(1, weight=0)
         check.columnconfigure(2, minsize=0)
         self.report = tk.Text(check, height=6, width=70, wrap="word", relief="flat", bg="#F8FAFD",
                               fg=C_INK, font=(FONT, 10), padx=10, pady=8, cursor="arrow",
                               highlightthickness=1, highlightbackground=C_LINE)
-        self.report.grid(row=0, column=0, sticky="we")
+        self.report.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(check, orient="vertical", command=self.report.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.report.configure(yscrollcommand=scroll.set)
@@ -1023,13 +1037,13 @@ class App(tk.Tk):
         self.report.tag_configure("head", font=(FONT, 10, "bold"))
         self.report.tag_configure("quote", foreground=C_MUTED, lmargin1=26, lmargin2=26)
 
-        # Progress + buttons
-        foot = tk.Frame(body, bg=C_BG)
-        foot.pack(fill="x", pady=(4, 0))
+        # Progress + buttons (in the fixed bottom bar)
         self.bar = ttk.Progressbar(foot, maximum=1.0, style="Accent.Horizontal.TProgressbar")
         self.bar.pack(fill="x")
-        tk.Label(foot, textvariable=self.status, bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w",
-                 justify="left", wraplength=720).pack(fill="x", pady=(6, 8))
+        status = tk.Label(foot, textvariable=self.status, bg=C_BG, fg=C_MUTED, font=(FONT, 9), anchor="w",
+                          justify="left", wraplength=720)
+        status.pack(fill="x", pady=(6, 8))
+        foot.bind("<Configure>", lambda e: status.configure(wraplength=max(200, e.width - 40)))
         btns = tk.Frame(foot, bg=C_BG)
         btns.pack(fill="x")
         self.go = ttk.Button(btns, text="▶  Make video", style="Accent.TButton", command=self.start)
@@ -1040,6 +1054,41 @@ class App(tk.Tk):
         self.refresh_check()
         if not find_tool("ffmpeg"):
             self.status.set("FFmpeg is not installed – run Setup.bat once (or: winget install Gyan.FFmpeg), then reopen this tool.")
+        self._initial_size(head, foot)
+
+    # ----- size: fit any screen -----
+
+    def _initial_size(self, head, foot):
+        """Open at the natural size, but never bigger than the screen (taskbar and
+        title bar left free); the cards scroll if the height doesn't fit."""
+        self.update_idletasks()
+        want_w = self.body.winfo_reqwidth() + self.vscroll.winfo_reqwidth()
+        want_h = head.winfo_reqheight() + self.body.winfo_reqheight() + foot.winfo_reqheight()
+        w = min(want_w, self.winfo_screenwidth() - 40)
+        h = min(want_h, self.winfo_screenheight() - 110)
+        x = max(0, (self.winfo_screenwidth() - w) // 2)
+        self.geometry(f"{w}x{h}+{x}+10")
+        self.minsize(min(w, 560), min(h, 420))
+
+    def _fit_body(self):
+        """Cards fill the window width; extra height goes to the Check panel;
+        a scrollbar appears only when the cards don't fit."""
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        need = self.body.winfo_reqheight()
+        self.canvas.itemconfigure(self.body_win, width=cw, height=max(need, ch))
+        self.canvas.configure(scrollregion=(0, 0, cw, max(need, ch)))
+        if need > ch + 1:
+            if not self.vscroll.winfo_ismapped():
+                self.vscroll.pack(side="right", fill="y", before=self.canvas)
+        elif self.vscroll.winfo_ismapped():
+            self.vscroll.pack_forget()
+            self.canvas.yview_moveto(0)
+
+    def _wheel(self, event):
+        # The Check panel scrolls itself; elsewhere the wheel scrolls the cards.
+        if event.widget is self.report or not self.vscroll.winfo_ismapped():
+            return
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
     # ----- look -----
 
@@ -1071,15 +1120,15 @@ class App(tk.Tk):
         st.configure("Accent.Horizontal.TProgressbar", thickness=10, background=C_ACCENT, troughcolor="#E3E7EF",
                      bordercolor="#E3E7EF", lightcolor=C_ACCENT, darkcolor=C_ACCENT)
 
-    def _card(self, parent, step, title):
+    def _card(self, parent, step, title, grow=False):
         outer = tk.Frame(parent, bg=C_CARD, highlightthickness=1, highlightbackground=C_LINE)
-        outer.pack(fill="x", pady=(0, 10))
+        outer.pack(fill="both" if grow else "x", expand=grow, pady=(0, 10))
         top = ttk.Frame(outer, style="Card.TFrame", padding=(16, 10, 16, 2))
         top.pack(fill="x")
         ttk.Label(top, text=step, style="Step.TLabel").pack(side="left")
         ttk.Label(top, text=title, style="Title.TLabel").pack(side="left", padx=(10, 0))
         inner = ttk.Frame(outer, style="Card.TFrame", padding=(16, 4, 16, 12))
-        inner.pack(fill="x")
+        inner.pack(fill="both" if grow else "x", expand=grow)
         # Same column widths in every card, so the boxes line up.
         inner.columnconfigure(0, minsize=250)
         inner.columnconfigure(1, weight=1)

@@ -1099,14 +1099,24 @@
   root.innerHTML = `
     <style>
       :host { all: initial; }
-      .panel { position: fixed; right: 16px; bottom: 16px; width: 360px; max-height: 80vh;
-        display: flex; flex-direction: column; z-index: 2147483647;
+      .panel { position: fixed; right: 16px; bottom: 16px; width: clamp(300px, 26vw, 420px);
+        max-height: calc(100vh - 32px); display: flex; flex-direction: column; z-index: 2147483647;
         font: 13px/1.4 system-ui, -apple-system, Segoe UI, sans-serif; color: #e8eaed;
         background: #202124; border: 1px solid #3c4043; border-radius: 12px;
         box-shadow: 0 8px 28px rgba(0,0,0,.45); overflow: hidden; }
-      .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #292a2d; }
+      .panel.moved { right: auto; bottom: auto; }
+      .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #292a2d;
+        cursor: move; user-select: none; touch-action: none; }
       .head b { flex: 1; font-size: 14px; }
-      .body { padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+      .head button { cursor: pointer; }
+      /* Two zones: the setup scrolls when the screen is short; the run zone (buttons,
+         progress, list, log) always stays fully visible. */
+      .body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+      .setup { padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 8px;
+        flex: 0 1 auto; min-height: 64px; }
+      .run { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto;
+        border-top: 1px solid #3c4043; background: #1d1e20; }
+      .setup > *, .run > * { flex-shrink: 0; }
       .collapsed .body { display: none; }
       button { font: inherit; color: #e8eaed; background: #3c4043; border: 0; border-radius: 8px;
         padding: 6px 10px; cursor: pointer; }
@@ -1119,7 +1129,8 @@
       input[type=number], input[type=text], select { font: inherit; color: #e8eaed; background: #303134;
         border: 1px solid #5f6368; border-radius: 6px; padding: 3px 6px; width: 100%; box-sizing: border-box; }
       .muted { color: #9aa0a6; font-size: 12px; }
-      .list { border: 1px solid #3c4043; border-radius: 8px; max-height: 200px; overflow: auto; }
+      .list { border: 1px solid #3c4043; border-radius: 8px; max-height: clamp(64px, 24vh, 260px); overflow: auto; }
+      .list:empty { display: none; }
       .item { display: grid; grid-template-columns: 22px 30px 1fr; gap: 4px; padding: 4px 6px;
         border-bottom: 1px solid #303134; }
       .item:last-child { border-bottom: 0; }
@@ -1129,7 +1140,15 @@
       .bar { height: 6px; background: #3c4043; border-radius: 3px; overflow: hidden; }
       .bar > div { height: 100%; background: #8ab4f8; width: 0; transition: width .3s; }
       .log { font: 11px/1.4 ui-monospace, Consolas, monospace; background: #171717; border-radius: 6px;
-        padding: 6px; max-height: 110px; overflow: auto; white-space: pre-wrap; color: #bdc1c6; }
+        padding: 6px; height: clamp(64px, 16vh, 200px); box-sizing: border-box; overflow: auto;
+        white-space: pre-wrap; overflow-wrap: anywhere; color: #bdc1c6; }
+      @media (max-height: 620px) {
+        .list { max-height: 72px; }
+        .log { height: 60px; }
+      }
+      @media (max-width: 640px) {
+        .panel:not(.moved) { left: 8px; right: 8px; bottom: 8px; width: auto; }
+      }
       details summary { cursor: pointer; color: #9aa0a6; }
       label.chk { display: flex; gap: 6px; align-items: center; }
       .refs { display: flex; gap: 8px; }
@@ -1173,14 +1192,29 @@
         border-top: 1px solid #3c4043; }
       .sb-foot .muted { flex: 1; }
       .sb-empty { color: #9aa0a6; text-align: center; padding: 40px 0; }
+      @media (max-width: 760px) {
+        .sb { width: calc(100vw - 16px); height: calc(100vh - 16px); }
+        .sb-top { grid-template-columns: 1fr; }
+        .sb-side { min-width: 0; }
+        .sb-row { grid-template-columns: 26px 1fr; }
+        .sb-row.head { display: none; }
+        .sb-row > textarea, .sb-acts { grid-column: 2; }
+        .sb-acts { flex-direction: row; flex-wrap: wrap; }
+        .sb-foot { flex-wrap: wrap; }
+      }
+      @media (max-height: 600px) {
+        .sb { height: calc(100vh - 16px); }
+        .sb-top textarea { height: 64px; }
+      }
     </style>
     <div class="panel">
       <div class="head">
-        <b>Flow Batch <span class="muted" id="ver"></span></b>
+        <b title="Drag to move · double-click to put it back in the corner">Flow Batch <span class="muted" id="ver"></span></b>
         <button class="icon" id="min" title="Minimise">–</button>
         <button class="icon" id="close" title="Hide (click the toolbar icon to show again)">×</button>
       </div>
       <div class="body">
+       <div class="setup">
         <div class="row">
           <button id="build" class="primary" title="Paste a plain script – it is split into scenes for you">Scene Builder…</button>
           <button id="pick">Load .txt file…</button>
@@ -1204,15 +1238,6 @@
           <button id="folderPick">Save folder…</button>
           <span class="muted" id="folderName"></span>
         </div>
-        <div class="bar"><div id="bar"></div></div>
-        <div class="list" id="list"></div>
-        <div class="row">
-          <button class="primary" id="start">Start</button>
-          <button id="pause">Pause</button>
-          <button id="stop">Stop</button>
-          <button id="retry" title="Run again only the prompts that failed (❌) or timed out (⚠️)">Retry failed</button>
-          <button id="reset" title="Mark every prompt as not done">Reset</button>
-        </div>
         <details>
           <summary>Settings</summary>
           <div class="grid" style="margin-top:6px">
@@ -1234,7 +1259,19 @@
             <button id="test">Test detection</button>
           </div>
         </details>
+       </div>
+       <div class="run">
+        <div class="row">
+          <button class="primary" id="start">Start</button>
+          <button id="pause">Pause</button>
+          <button id="stop">Stop</button>
+          <button id="retry" title="Run again only the prompts that failed (❌) or timed out (⚠️)">Retry failed</button>
+          <button id="reset" title="Mark every prompt as not done">Reset</button>
+        </div>
+        <div class="bar"><div id="bar"></div></div>
+        <div class="list" id="list"></div>
         <div class="log" id="log"></div>
+       </div>
       </div>
     </div>
     <div class="sb-back" id="sb" hidden>
@@ -1750,6 +1787,49 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
   };
   $('close').onclick = () => (host.style.display = 'none');
 
+  // Drag the panel by its title bar. The place is remembered and kept on screen when
+  // the window size changes; double-click the title bar to put it back in the corner.
+  const panelEl = root.querySelector('.panel');
+  function placePanel(pos) {
+    if (!pos) {
+      panelEl.classList.remove('moved');
+      panelEl.style.left = panelEl.style.top = panelEl.style.maxHeight = '';
+      return;
+    }
+    const w = panelEl.getBoundingClientRect().width;
+    const x = Math.min(Math.max(8, pos.x), Math.max(8, innerWidth - w - 8));
+    const y = Math.min(Math.max(8, pos.y), Math.max(8, innerHeight - Math.min(320, innerHeight - 16)));
+    panelEl.classList.add('moved');
+    panelEl.style.left = `${x}px`;
+    panelEl.style.top = `${y}px`;
+    panelEl.style.maxHeight = `${innerHeight - y - 8}px`;
+  }
+  root.querySelector('.head').addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('button')) return;
+    const r = panelEl.getBoundingClientRect();
+    const dx = e.clientX - r.left;
+    const dy = e.clientY - r.top;
+    const move = (ev) => placePanel({ x: ev.clientX - dx, y: ev.clientY - dy });
+    const up = () => {
+      removeEventListener('pointermove', move);
+      removeEventListener('pointerup', up);
+      if (panelEl.classList.contains('moved')) {
+        state.settings.panelPos = { x: parseFloat(panelEl.style.left), y: parseFloat(panelEl.style.top) };
+        save();
+      }
+    };
+    addEventListener('pointermove', move);
+    addEventListener('pointerup', up);
+    e.preventDefault();
+  });
+  root.querySelector('.head').addEventListener('dblclick', (e) => {
+    if (e.target.closest('button')) return;
+    state.settings.panelPos = null;
+    placePanel(null);
+    save();
+  });
+  addEventListener('resize', () => state.settings.panelPos && placePanel(state.settings.panelPos));
+
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === 'toggle') host.style.display = host.style.display === 'none' ? '' : 'none';
   });
@@ -1761,6 +1841,7 @@ Optional: a line like  ## The storm  starts a YouTube chapter."></textarea>
   const version = (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '';
   $('ver').textContent = version ? `v${version}` : '';
   load().then(() => {
+    if (state.settings.panelPos) placePanel(state.settings.panelPos);
     render();
     renderFolder();
     log(`Flow Batch v${version} ready (screen ${window.innerWidth}×${window.innerHeight})`);

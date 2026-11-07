@@ -22,7 +22,7 @@ flowchart LR
     E --> F["video.mp4<br/>+ timings.csv"]
 ```
 
-Current version: **1.7.0** (shown in the panel title).
+Current version: **1.7.1** (shown in the panel title).
 
 ---
 
@@ -401,6 +401,13 @@ in the panel list to see its narration and full prompt.
 
 ## Flow Batch panel reference
 
+The panel adapts to the screen. The top part (file, style, references, folder,
+settings) scrolls on small screens, while the bottom part (**Start … Reset**,
+progress bar, prompt list, log) always stays fully visible. **Drag the title
+bar** to move the panel anywhere (it remembers the place); **double-click** the
+title bar to put it back in the corner. **–** folds it up. On narrow windows,
+Scene Builder shows narration and picture under each other.
+
 ### Main controls
 
 | Control | What it does |
@@ -513,7 +520,9 @@ appears.
 ### The window
 
 The window has three cards – **1 Your files**, **2 Options**, **3 Check** – and
-the progress bar with **Make video** and **Open folder** at the bottom.
+the progress bar with **Make video** and **Open folder** at the bottom. It opens
+at a size that fits your screen and can be resized: on small screens the cards
+scroll (the bottom bar stays visible), on big ones the Check panel grows.
 
 | Field | Meaning |
 |---|---|
